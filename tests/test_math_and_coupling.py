@@ -2,6 +2,7 @@
 
 import torch
 import pytest
+from scipy.optimize import linear_sum_assignment
 from rs_flow_vqa.models.flow_matching import compute_minibatch_ot_coupling, compute_cfm_loss
 from rs_flow_vqa.models.bridge import TokenTransformer
 
@@ -49,3 +50,10 @@ def test_ot_coupling_preserves_associations():
         cond_val = int(c_ot[i, 0].item())
         original_y = y[cond_val]
         assert torch.allclose(y_ot[i], original_y)
+
+    returned_cost = ((y_ot - eps) ** 2).sum().item()
+    y_flat, eps_flat = y.reshape(B, -1), eps.reshape(B, -1)
+    cost = ((y_flat[:, None] - eps_flat[None]) ** 2).sum(-1).numpy()
+    rows, cols = linear_sum_assignment(cost)
+    optimal_cost = float(cost[rows, cols].sum())
+    assert returned_cost == pytest.approx(optimal_cost, rel=1e-6)

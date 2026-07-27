@@ -1,10 +1,13 @@
 {
   "num_images": 20,
   "num_captions": 100,
-  "num_unique_tokens": 1000,
+  "num_unique_tokens": 2048,
   "vision_dim": 1024,
   "llm_dim": 2048,
-  "dataset_fingerprint": "rsicd_v1_hash",
+  "dataset_fingerprint": "74eb5a56789a0f07cbea26cd40fba69ade1d927e2476f501d64147b606ec8f36",
   "vision_backbone": "scale_mae_vit_l",
-  "llm_backbone": "Qwen/Qwen2.5-3B-Instruct"
+  "llm_backbone": "Qwen/Qwen2.5-3B-Instruct",
+  "token_storage": "compact_indices",
+  "max_prefix_length": 32,
+  "fixed_gsd": 1.0
 }

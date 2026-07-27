@@ -26,7 +26,14 @@ def train_teacher_pipeline(cfg: Config) -> str:
             f"Feature cache does not exist at {cfg.cache_dir}. Run `cache-features` first!"
         )
 
-    cache_data = cache.load_cache()
+    cache_data = cache.load_cache(
+        {
+            "vision_backbone": cfg.models.vision_backbone,
+            "llm_backbone": cfg.models.llm_backbone,
+            "token_storage": "compact_indices",
+            "max_prefix_length": cfg.models.max_prefix_length,
+        }
+    )
     image_features = cache_data["image_features"]  # [N_img, 1024]
     caption_token_ids = cache_data["caption_token_ids"]  # [N_cap, 32]
     caption_lengths = cache_data["caption_lengths"]  # [N_cap]
@@ -35,8 +42,26 @@ def train_teacher_pipeline(cfg: Config) -> str:
     unique_token_embeds = cache_data["token_embed_table"]
     normalizer = cache_data["whitening_normalizer"].to(device)
 
-    num_captions = caption_token_ids.shape[0]
     K = cfg.models.max_prefix_length
+    train_images = {
+        i
+        for i, metadata in enumerate(cache_data["image_metadata"])
+        if metadata.get("split") == "train"
+    }
+    train_indices = torch.tensor(
+        [
+            i
+            for i, image_index in enumerate(caption_to_img_idx.tolist())
+            if image_index in train_images
+        ],
+        dtype=torch.long,
+    )
+    if train_indices.numel() == 0:
+        raise RuntimeError("Feature cache contains no RSICD training captions")
+    length_buckets = {}
+    for index in train_indices.tolist():
+        bucket = max(0, (int(caption_lengths[index]) - 1) // 4)
+        length_buckets.setdefault(bucket, []).append(index)
 
     # Pre-lookup all target prompt embeddings & whiten them
     # For large dataset, performed on the fly or batched
@@ -48,7 +73,9 @@ def train_teacher_pipeline(cfg: Config) -> str:
         batch_c = image_features[batch_img_indices].to(device)  # [B, 1024]
 
         # Lookup token embeddings
-        batch_y_unnorm = torch.nn.functional.embedding(batch_ids.to(device), unique_token_embeds.to(device))  # [B, 32, 2048]
+        batch_y_unnorm = torch.nn.functional.embedding(
+            batch_ids.to(device), unique_token_embeds.to(device)
+        )
 
         # Mask
         batch_mask = torch.zeros(len(indices), K, device=device)
@@ -96,6 +123,8 @@ def train_teacher_pipeline(cfg: Config) -> str:
         return max(0.05, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    use_amp = device.type == "cuda" and cfg.precision == "fp16"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # CrossEntropy / BCE loss for prefix length head
     length_criterion = torch.nn.BCEWithLogitsLoss()
@@ -111,34 +140,43 @@ def train_teacher_pipeline(cfg: Config) -> str:
     step = 0
     batch_size = cfg.teacher.batch_size
     optimizer.zero_grad()
+    if (output_dir / "model_weights.safetensors").exists():
+        step, _, _ = load_checkpoint(
+            str(output_dir),
+            {"teacher": teacher, "prefix_head": prefix_head},
+            optimizers={"opt": optimizer},
+            schedulers={"sch": scheduler},
+            scalers={"scaler": scaler},
+            device=str(device),
+        )
+        print(f"Resuming teacher training from step {step}")
 
     while step < total_steps:
-        # Sample minibatch indices randomly
-        idx = torch.randint(0, num_captions, (batch_size,))
+        # Length-bucketed batches make the masked OT cost comparable.
+        bucket_values = list(length_buckets.values())
+        selected = bucket_values[torch.randint(0, len(bucket_values), ()).item()]
+        positions = torch.randint(0, len(selected), (batch_size,))
+        idx = torch.tensor([selected[i] for i in positions.tolist()])
         y_white, c, mask, lengths = get_batch(idx)
 
-        # 1. CFM loss
-        cfm_loss, metrics = compute_cfm_loss(
-            teacher=teacher,
-            y=y_white,
-            c=c,
-            mask=mask,
-            coupling=cfg.teacher.coupling,
-        )
-
-        # 2. Prefix length head loss
-        pred_logits = prefix_head(c)
-        length_loss = length_criterion(pred_logits, mask)
-
-        total_loss = (cfm_loss + length_loss) / grad_accum_steps
-        total_loss.backward()
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            cfm_loss, metrics = compute_cfm_loss(
+                teacher=teacher, y=y_white, c=c, mask=mask,
+                coupling=cfg.teacher.coupling,
+            )
+            pred_logits = prefix_head(c)
+            length_loss = length_criterion(pred_logits, mask)
+            total_loss = (cfm_loss + length_loss) / grad_accum_steps
+        scaler.scale(total_loss).backward()
 
         if (step + 1) % grad_accum_steps == 0 or (step + 1) == total_steps:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 list(teacher.parameters()) + list(prefix_head.parameters()),
                 cfg.teacher.grad_clip,
             )
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             optimizer.zero_grad()
 
@@ -146,6 +184,22 @@ def train_teacher_pipeline(cfg: Config) -> str:
 
         if step % max(1, total_steps // 10) == 0 or step == total_steps:
             print(f"[Teacher Step {step}/{total_steps}] CFM Loss: {cfm_loss.item():.4f} | Length Loss: {length_loss.item():.4f}")
+
+        if step % 1000 == 0:
+            save_checkpoint(
+                str(output_dir),
+                {"teacher": teacher, "prefix_head": prefix_head},
+                {
+                    "dataset_fingerprint": cache_data["manifest"]["dataset_fingerprint"],
+                    "vision_backbone": cfg.models.vision_backbone,
+                    "llm_backbone": cfg.models.llm_backbone,
+                    "model_type": "teacher",
+                },
+                step,
+                optimizers={"opt": optimizer},
+                schedulers={"sch": scheduler},
+                scalers={"scaler": scaler},
+            )
 
     manifest = {
         "dataset_fingerprint": cache_data["manifest"].get("dataset_fingerprint", "rsicd_v1"),
@@ -161,6 +215,7 @@ def train_teacher_pipeline(cfg: Config) -> str:
         global_step=step,
         optimizers={"opt": optimizer},
         schedulers={"sch": scheduler},
+        scalers={"scaler": scaler},
     )
 
     print(f"Teacher training finished! Checkpoint saved at: {output_dir}")

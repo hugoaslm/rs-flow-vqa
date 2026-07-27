@@ -27,11 +27,14 @@ class RSICDDataset(Dataset):
 
         json_path = self.data_dir / "dataset_rsicd.json"
         if not json_path.exists():
-            if is_smoke or not self.data_dir.exists():
+            if is_smoke:
                 print(f"Dataset JSON not found at {json_path}. Generating synthetic RSICD data for split {split}...")
                 json_path = Path(generate_synthetic_rsicd(str(self.data_dir)))
             else:
-                raise FileNotFoundError(f"RSICD dataset JSON not found at: {json_path}")
+                raise FileNotFoundError(
+                    f"RSICD dataset JSON not found at {json_path}. "
+                    "Download RSICD explicitly or run with --smoke."
+                )
 
         with open(json_path, "r", encoding="utf-8") as f:
             raw_data = json.load(f)

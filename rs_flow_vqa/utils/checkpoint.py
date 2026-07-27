@@ -1,6 +1,7 @@
 """Checkpoint saving, loading, and manifest verification using Safetensors."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 import torch
@@ -36,15 +37,19 @@ def save_checkpoint(
             # Safetensors requires contiguous tensors on CPU
             weights[f"{mod_name}.{k}"] = v.detach().cpu().contiguous()
 
-    save_safetensors(weights, str(ckpt_path / STATE_FILENAME))
+    weights_tmp = ckpt_path / f".{STATE_FILENAME}.tmp"
+    save_safetensors(weights, str(weights_tmp))
+    os.replace(weights_tmp, ckpt_path / STATE_FILENAME)
 
     # 2. Save manifest
     manifest_data = {
         "global_step": global_step,
         **manifest,
     }
-    with open(ckpt_path / MANIFEST_FILENAME, "w", encoding="utf-8") as f:
+    manifest_tmp = ckpt_path / f".{MANIFEST_FILENAME}.tmp"
+    with open(manifest_tmp, "w", encoding="utf-8") as f:
         json.dump(manifest_data, f, indent=2)
+    os.replace(manifest_tmp, ckpt_path / MANIFEST_FILENAME)
 
     # 3. Save trainer states (optimizer, scheduler, scaler, extra state)
     trainer_state: Dict[str, Any] = {
@@ -54,7 +59,9 @@ def save_checkpoint(
         "scalers": {k: v.state_dict() for k, v in (scalers or {}).items() if hasattr(v, "state_dict")},
         "extra_state": extra_state or {},
     }
-    torch.save(trainer_state, str(ckpt_path / TRAINER_STATE_FILENAME))
+    trainer_tmp = ckpt_path / f".{TRAINER_STATE_FILENAME}.tmp"
+    torch.save(trainer_state, str(trainer_tmp))
+    os.replace(trainer_tmp, ckpt_path / TRAINER_STATE_FILENAME)
 
 
 def load_checkpoint(
@@ -80,13 +87,12 @@ def load_checkpoint(
 
     # Check compatibility if expected manifest is provided
     if expected_manifest:
-        for key in ["dataset_fingerprint", "vision_backbone", "llm_backbone"]:
-            if key in expected_manifest and key in manifest:
-                if expected_manifest[key] != manifest[key]:
-                    raise ValueError(
-                        f"Incompatible checkpoint manifest for key '{key}': "
-                        f"expected '{expected_manifest[key]}', got '{manifest[key]}'"
-                    )
+        for key, expected_value in expected_manifest.items():
+            if key not in manifest or expected_value != manifest[key]:
+                raise ValueError(
+                    f"Incompatible checkpoint manifest for key '{key}': "
+                    f"expected '{expected_value}', got '{manifest.get(key)}'"
+                )
 
     # Load safetensors weights
     weights = load_safetensors(str(ckpt_path / STATE_FILENAME), device=device)
@@ -102,8 +108,11 @@ def load_checkpoint(
 
     # Load weights into provided models
     for mod_name, module in models.items():
-        if module is not None and mod_name in module_weights:
-            module.load_state_dict(module_weights[mod_name], strict=True)
+        if module is None:
+            continue
+        if mod_name not in module_weights:
+            raise KeyError(f"Checkpoint does not contain requested model {mod_name!r}")
+        module.load_state_dict(module_weights[mod_name], strict=True)
 
     # Load trainer states if files exist
     trainer_file = ckpt_path / TRAINER_STATE_FILENAME

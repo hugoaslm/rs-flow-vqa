@@ -45,6 +45,7 @@ def load_config(
         raw_dict = yaml.safe_load(f)
 
     cfg = Config(raw_dict)
+    cfg["is_smoke"] = bool(smoke)
 
     if smoke:
         cfg["is_smoke"] = True

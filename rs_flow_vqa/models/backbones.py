@@ -1,81 +1,140 @@
-"""Vision and LLM backbone wrappers for Scale-MAE and Qwen2.5-3B-Instruct."""
+"""Frozen Scale-MAE and Qwen backbone wrappers.
 
-from typing import Optional, Tuple, Dict, Any
+Mocks are available only when ``smoke=True``. Real runs fail loudly if the
+required model packages or checkpoints cannot be loaded.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 
 
+def load_rgb_image(path: str | Path, size: int = 224) -> torch.Tensor:
+    """Load an image as a uint8 CHW tensor suitable for TorchGeo weights."""
+    with Image.open(path) as image:
+        image = image.convert("RGB").resize((size, size), Image.Resampling.BICUBIC)
+        array = np.asarray(image, dtype=np.uint8).copy()
+    return torch.from_numpy(array).permute(2, 0, 1).contiguous()
+
+
 class ScaleMAEEncoder(nn.Module):
-    """Frozen Scale-MAE ViT-L Vision Encoder wrapper.
+    """Frozen Scale-MAE ViT-L encoder producing 1024-dimensional features."""
 
-    Produces a globally pooled 1024-dimensional feature vector c in R^1024.
-    """
-
-    def __init__(self, model_name: str = "scale_mae_vit_l", device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model_name: str = "scale_mae_vit_l",
+        device: str = "cpu",
+        smoke: bool = False,
+    ) -> None:
         super().__init__()
         self.model_name = model_name
-        self.device = device
+        self.device_name = device
         self.output_dim = 1024
+        self.smoke = smoke
 
-        # Fallback linear projection for smoke / mock mode when pretrained weights aren't downloaded
-        self._fallback_proj = nn.Linear(3 * 224 * 224, self.output_dim)
-        # Freeze backbone parameters
-        for p in self.parameters():
-            p.requires_grad = False
+        if smoke:
+            self.model = nn.Sequential(
+                nn.Flatten(), nn.Linear(3 * 224 * 224, self.output_dim)
+            )
+            self.transforms = None
+        else:
+            try:
+                from torchgeo.models import (
+                    ScaleMAELarge16_Weights,
+                    scalemae_large_patch16,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Real Scale-MAE extraction requires torchgeo>=0.6. "
+                    "Install the project with its 'gpu' dependencies."
+                ) from exc
+            weights = ScaleMAELarge16_Weights.FMOW_RGB
+            self.transforms = weights.transforms()
+            self.model = scalemae_large_patch16(
+                weights=weights, num_classes=0, global_pool="avg", res=1.0
+            )
 
-    def forward(self, images: torch.Tensor, gsd: Optional[float] = 1.0) -> torch.Tensor:
-        """Extract globally pooled 1024-dim Scale-MAE image representation.
+        self.eval()
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
 
-        Args:
-            images: Tensor of shape [B, C, H, W]
-            gsd: Ground Sample Distance in meters (10m for RSVQA, default 1m for RSICD)
+    @torch.no_grad()
+    def forward(
+        self, images: torch.Tensor, gsd: Optional[float] = 1.0
+    ) -> torch.Tensor:
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"Expected BCHW RGB images, got {tuple(images.shape)}")
+        if images.shape[-2:] != (224, 224):
+            images = F.interpolate(images.float(), (224, 224), mode="bilinear")
 
-        Returns:
-            Features tensor [B, 1024]
-        """
-        with torch.no_grad():
-            B = images.shape[0]
-            # Resample / scale flattened image tensor into deterministic 1024-dim vector
-            flat = images.reshape(B, -1)
-            if flat.shape[1] != 3 * 224 * 224:
-                flat = torch.nn.functional.interpolate(
-                    images, size=(224, 224), mode="bilinear", align_corners=False
-                ).reshape(B, -1)
-            feats = self._fallback_proj(flat)
-            # Normalize feature vectors
-            feats = torch.nn.functional.normalize(feats, dim=-1)
-            return feats
+        if self.smoke:
+            x = images.float()
+            if x.max() > 1:
+                x = x / 255.0
+            return F.normalize(self.model(x), dim=-1)
+
+        # TorchGeo's released transforms expect uint8-like values in [0, 255].
+        x = images
+        if x.dtype != torch.uint8 and x.max() <= 1.0:
+            x = x * 255.0
+        x = self.transforms(x.float())
+        self.model.res = float(gsd if gsd is not None else 1.0)
+        features = self.model(x)
+        if features.ndim == 3:
+            features = features.mean(dim=1)
+        if features.shape[-1] != self.output_dim:
+            raise RuntimeError(f"Scale-MAE returned unexpected shape {features.shape}")
+        return features.float()
 
 
 class QwenEmbeddingWrapper:
-    """Wrapper around Qwen2.5-3B-Instruct tokenizer and frozen token embedding layer."""
+    """Qwen tokenizer and frozen input embedding layer."""
 
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-3B-Instruct", device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+        device: str = "cpu",
+        smoke: bool = False,
+    ) -> None:
         self.model_name = model_name
-        self.device = device
+        self.device = torch.device(device)
         self.embedding_dim = 2048
+        self.smoke = smoke
 
-        # Fallback / mock embedding table when transformers model is loading or in smoke mode
-        self.vocab_size = 151936
-        self.mock_embeddings = None
+        if smoke:
+            self.tokenizer = None
+            generator = torch.Generator().manual_seed(42)
+            self.mock_embeddings = torch.randn(2048, self.embedding_dim, generator=generator)
+            self.model = None
+            self.embedding = None
+        else:
+            try:
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+            except ImportError as exc:
+                raise RuntimeError("Qwen extraction requires transformers") from exc
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, low_cpu_mem_usage=True
+            ).to(self.device)
+            self.model.eval()
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
+            self.embedding = self.model.get_input_embeddings()
+            if self.embedding.embedding_dim != self.embedding_dim:
+                raise RuntimeError(
+                    f"Expected Qwen width 2048, got {self.embedding.embedding_dim}"
+                )
 
-    def get_embedding_matrix(self) -> torch.Tensor:
-        """Return the token embedding matrix [VocabSize, 2048]."""
-        if self.mock_embeddings is None:
-            # Deterministic mock embedding table for testing / offline execution
-            g = torch.Generator().manual_seed(42)
-            self.mock_embeddings = torch.randn(self.vocab_size, self.embedding_dim, generator=g)
-        return self.mock_embeddings
-
+    @torch.no_grad()
     def lookup_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """Lookup token IDs in frozen embedding table.
-
-        Args:
-            token_ids: Tensor of shape [..., K]
-
-        Returns:
-            Embeddings of shape [..., K, 2048]
-        """
-        embed_matrix = self.get_embedding_matrix().to(token_ids.device)
-        return torch.nn.functional.embedding(token_ids, embed_matrix)
+        if self.smoke:
+            return F.embedding(token_ids.cpu(), self.mock_embeddings).to(token_ids.device)
+        return self.embedding(token_ids.to(self.device)).float()

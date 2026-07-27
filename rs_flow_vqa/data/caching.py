@@ -43,7 +43,7 @@ class FeatureCache:
 
         # 1. Save image features
         save_safetensors(
-            {"image_features": image_features.float().contiguous()},
+            {"image_features": image_features.half().contiguous()},
             str(self.features_path)
         )
 
@@ -51,7 +51,7 @@ class FeatureCache:
         save_safetensors(
             {
                 "unique_token_ids": unique_token_ids.long().contiguous(),
-                "unique_token_embeds": unique_token_embeds.float().contiguous(),
+                "unique_token_embeds": unique_token_embeds.half().contiguous(),
             },
             str(self.table_path)
         )
@@ -94,13 +94,14 @@ class FeatureCache:
             manifest = json.load(f)
 
         if expected_manifest:
-            for k in ["dataset_fingerprint", "vision_backbone", "llm_backbone"]:
-                if k in expected_manifest and k in manifest:
-                    if expected_manifest[k] != manifest[k]:
-                        raise ValueError(
-                            f"Cache manifest mismatch for key '{k}': "
-                            f"expected '{expected_manifest[k]}', got '{manifest[k]}'"
-                        )
+            for k, expected_value in expected_manifest.items():
+                if k not in manifest:
+                    raise ValueError(f"Cache manifest is missing required key {k!r}")
+                if expected_value != manifest[k]:
+                    raise ValueError(
+                        f"Cache manifest mismatch for key '{k}': "
+                        f"expected '{expected_value}', got '{manifest[k]}'"
+                    )
 
         # Load safetensors
         features_dict = load_safetensors(str(self.features_path))
@@ -122,9 +123,9 @@ class FeatureCache:
 
         return {
             "manifest": manifest,
-            "image_features": features_dict["image_features"],  # [N_img, 1024]
+            "image_features": features_dict["image_features"].float(),  # [N_img, 1024]
             "token_lookup_map": token_lookup_map,
-            "token_embed_table": unique_token_embeds,  # [U, 2048]
+            "token_embed_table": unique_token_embeds.float(),  # [U, 2048]
             "unique_token_ids": unique_token_ids,
             "caption_token_ids": torch.tensor(captions_payload["caption_token_ids"], dtype=torch.long),
             "caption_lengths": torch.tensor(captions_payload["caption_lengths"], dtype=torch.long),

@@ -1,6 +1,7 @@
 """Evaluation metrics for caption generation and VQA Exact Match by category."""
 
 import math
+import re
 from collections import Counter
 from typing import Dict, List, Any, Tuple
 import numpy as np
@@ -78,8 +79,8 @@ def compute_vqa_accuracy(predictions: List[Dict[str, Any]]) -> Dict[str, float]:
 
     for item in predictions:
         qtype = item.get("type", "presence")
-        pred_ans = str(item.get("predicted", "")).lower().strip()
-        gt_ans = str(item.get("ground_truth", "")).lower().strip()
+        pred_ans = normalize_vqa_answer(item.get("predicted", ""))
+        gt_ans = normalize_vqa_answer(item.get("ground_truth", ""))
 
         is_correct = (pred_ans == gt_ans)
 
@@ -98,3 +99,21 @@ def compute_vqa_accuracy(predictions: List[Dict[str, Any]]) -> Dict[str, float]:
         results[f"category_{cat}"] = cat_correct.get(cat, 0) / cat_counts[cat]
 
     return results
+
+
+def normalize_vqa_answer(value: Any) -> str:
+    """Normalize short generative answers to the official exact-match space."""
+    text = str(value).lower().strip().splitlines()[0]
+    text = re.sub(r"^(answer|the answer is)\s*:\s*", "", text)
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    for label in ("yes", "no", "rural", "urban"):
+        if re.search(rf"\b{label}\b", text):
+            return label
+    range_match = re.search(r"\bbetween\s+\d+\s+and\s+\d+\b", text)
+    if range_match:
+        return range_match.group(0)
+    number = re.fullmatch(r"(?:there (?:are|is) )?(-?\d+)", text)
+    if number:
+        return number.group(1)
+    return text

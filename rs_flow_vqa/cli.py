@@ -1,6 +1,7 @@
 """Command Line Interface for RS-Flow-VQA."""
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 from typing import Optional
@@ -14,11 +15,12 @@ from rs_flow_vqa.training.train_teacher import train_teacher_pipeline
 from rs_flow_vqa.training.distill_freeflow import distill_freeflow_pipeline
 from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
-from rs_flow_vqa.models.backbones import ScaleMAEEncoder, QwenEmbeddingWrapper
+from rs_flow_vqa.models.backbones import ScaleMAEEncoder, QwenEmbeddingWrapper, load_rgb_image
 from rs_flow_vqa.models.bridge import TokenTransformer, PrefixLengthClassifier
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 from rs_flow_vqa.utils.checkpoint import load_checkpoint
+from rs_flow_vqa.utils.reproducibility import set_seed
 import torch
 
 
@@ -47,47 +49,138 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
     )
     print(f"Caching Scale-MAE features and Qwen token lookup table to: {cfg.cache_dir}")
 
-    qwen_wrapper = QwenEmbeddingWrapper()
+    set_seed(cfg.seed)
+    is_smoke = bool(cfg.get("is_smoke", False))
+    device = torch.device(
+        cfg.device if cfg.device == "cuda" and torch.cuda.is_available() else "cpu"
+    )
     ds = RSICDDataset(
         data_dir=cfg.data.rsicd_data_dir,
         split="all",
         max_prefix_length=cfg.models.max_prefix_length,
         tokenizer=None,
-        is_smoke=cfg.get("is_smoke", False),
+        is_smoke=is_smoke,
     )
 
     cache = FeatureCache(cfg.cache_dir)
 
-    num_samples = len(ds)
-    num_images = min(num_samples, 20 if cfg.get("is_smoke", False) else 100)
+    if not ds.samples:
+        raise RuntimeError("RSICD contains no caption samples")
 
-    # Generate image features [N_img, 1024]
-    g = torch.Generator().manual_seed(cfg.seed)
-    image_features = torch.randn(num_images, cfg.models.vision_dim, generator=g)
+    # Deduplicate the five caption records per image while preserving split.
+    image_key_to_index = {}
+    image_meta = []
+    caption_to_img_list = []
+    captions = []
+    for sample in ds.samples:
+        key = (sample["image_id"], sample["filename"])
+        if key not in image_key_to_index:
+            image_key_to_index[key] = len(image_meta)
+            image_meta.append(
+                {
+                    "id": sample["image_id"],
+                    "path": sample["image_path"],
+                    "filename": sample["filename"],
+                    "split": sample["split"],
+                    "gsd": float(cfg.models.fixed_gsd),
+                }
+            )
+        caption_to_img_list.append(image_key_to_index[key])
+        captions.append(sample["caption"])
 
-    # Caption token IDs & lengths
-    caption_token_ids = torch.randint(1, 1000, (num_images * 5, cfg.models.max_prefix_length), generator=g)
-    caption_lengths = torch.randint(5, cfg.models.max_prefix_length, (num_images * 5,), generator=g)
-    caption_to_img = torch.arange(num_images).repeat_interleave(5)
+    if is_smoke:
+        generator = torch.Generator().manual_seed(cfg.seed)
+        image_features = torch.randn(len(image_meta), cfg.models.vision_dim, generator=generator)
+        raw_sequences = [
+            torch.randint(0, 2048, (min(8 + i % 8, cfg.models.max_prefix_length),), generator=generator).tolist()
+            for i in range(len(captions))
+        ]
+        unique_ids = torch.arange(2048, dtype=torch.long)
+        unique_embeds = torch.randn(2048, cfg.models.llm_dim, generator=generator)
+    else:
+        vision = ScaleMAEEncoder(
+            cfg.models.vision_backbone, device=str(device), smoke=False
+        ).to(device)
+        feature_batches = []
+        vision_batch_size = 8
+        for start in range(0, len(image_meta), vision_batch_size):
+            records = image_meta[start : start + vision_batch_size]
+            images = torch.stack([load_rgb_image(record["path"]) for record in records]).to(device)
+            # RSICD lacks reliable per-image GSD, so the configured fixed value
+            # is used consistently and recorded in the manifest.
+            feature_batches.append(
+                vision(images, gsd=float(cfg.models.fixed_gsd)).cpu()
+            )
+        image_features = torch.cat(feature_batches)
+        del vision
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    # Unique tokens & compact lookup table
-    unique_ids = torch.arange(1, 1001, dtype=torch.long)
-    unique_embeds = torch.randn(1000, cfg.models.llm_dim, generator=g)
+        qwen = QwenEmbeddingWrapper(
+            cfg.models.llm_backbone, device=str(device), smoke=False
+        )
+        raw_sequences = [
+            qwen.tokenizer.encode(text, add_special_tokens=False)[
+                : cfg.models.max_prefix_length
+            ]
+            for text in captions
+        ]
+        unique_ids = torch.tensor(
+            sorted({token for sequence in raw_sequences for token in sequence}),
+            dtype=torch.long,
+        )
+        unique_embeds = qwen.lookup_tokens(unique_ids.to(device)).cpu()
+        del qwen
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    # Compute whitening stats
+    # Store compact table indices, never raw Qwen IDs, in caption rows.
+    id_to_compact = {int(token): i for i, token in enumerate(unique_ids.tolist())}
+    caption_token_ids = torch.zeros(
+        len(raw_sequences), cfg.models.max_prefix_length, dtype=torch.long
+    )
+    caption_lengths = torch.zeros(len(raw_sequences), dtype=torch.long)
     masks = torch.zeros_like(caption_token_ids, dtype=torch.float32)
-    for i, l in enumerate(caption_lengths):
-        masks[i, :l] = 1.0
+    for row, sequence in enumerate(raw_sequences):
+        length = min(len(sequence), cfg.models.max_prefix_length)
+        caption_lengths[row] = length
+        if length:
+            caption_token_ids[row, :length] = torch.tensor(
+                [id_to_compact[int(token)] for token in sequence[:length]]
+            )
+            masks[row, :length] = 1
+    caption_to_img = torch.tensor(caption_to_img_list, dtype=torch.long)
 
-    target_embeds = torch.nn.functional.embedding(caption_token_ids, unique_embeds)
-    whitening_norm = WhiteningNormalizer.compute_from_tokens(target_embeds, masks)
+    # Streaming whitening avoids materializing all [caption, token, 2048]
+    # embeddings (several GB for full RSICD).
+    count = torch.tensor(0.0, dtype=torch.float64)
+    value_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
+    square_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
+    for start in range(0, len(raw_sequences), 512):
+        ids = caption_token_ids[start : start + 512]
+        valid = masks[start : start + 512].bool()
+        values = torch.nn.functional.embedding(ids, unique_embeds.float())[valid].double()
+        count += values.shape[0]
+        value_sum += values.sum(0)
+        square_sum += values.square().sum(0)
+    if count.item() == 0:
+        raise RuntimeError("No valid caption tokens were found")
+    mean = (value_sum / count).float()
+    variance = (square_sum / count - (value_sum / count).square()).clamp_min(1e-12)
+    whitening_norm = WhiteningNormalizer(mean, variance.sqrt().float())
 
-    image_meta = [{"id": i, "path": f"rsicd_{i}.jpg", "split": "train"} for i in range(num_images)]
-
+    dataset_json = Path(cfg.data.rsicd_data_dir) / "dataset_rsicd.json"
+    fingerprint = hashlib.sha256()
+    fingerprint.update(dataset_json.read_bytes())
+    fingerprint.update(cfg.models.vision_backbone.encode())
+    fingerprint.update(cfg.models.llm_backbone.encode())
     manifest_meta = {
-        "dataset_fingerprint": "rsicd_v1_hash",
+        "dataset_fingerprint": fingerprint.hexdigest(),
         "vision_backbone": cfg.models.vision_backbone,
         "llm_backbone": cfg.models.llm_backbone,
+        "token_storage": "compact_indices",
+        "max_prefix_length": cfg.models.max_prefix_length,
+        "fixed_gsd": float(cfg.models.fixed_gsd),
     }
 
     cache.save_cache(
@@ -168,8 +261,12 @@ def answer_cmd(args: argparse.Namespace) -> None:
     print(f"Question: {args.question}")
     print(f"Checkpoint: {args.checkpoint}")
 
-    vision_encoder = ScaleMAEEncoder(device=str(device)).to(device)
-    llm_wrapper = QwenSoftPrefixWrapper(device=str(device))
+    vision_encoder = ScaleMAEEncoder(
+        cfg.models.vision_backbone, device=str(device), smoke=cfg.is_smoke
+    ).to(device)
+    llm_wrapper = QwenSoftPrefixWrapper(
+        device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
+    )
 
     # Load student model
     student_backbone = TokenTransformer(
@@ -189,20 +286,33 @@ def answer_cmd(args: argparse.Namespace) -> None:
         hidden_dim=cfg.bridge.hidden_dim,
     ).to(device)
 
-    if Path(args.checkpoint).exists():
-        load_checkpoint(args.checkpoint, {"student_ema": student_backbone, "prefix_head": prefix_head}, device=str(device))
+    if not (Path(args.checkpoint) / "model_weights.safetensors").exists():
+        raise FileNotFoundError(f"Student checkpoint missing at {args.checkpoint}")
+    load_checkpoint(
+        args.checkpoint,
+        {"student_ema": student_backbone, "prefix_head": prefix_head},
+        device=str(device),
+    )
 
     student = FreeFlowStudent(student_backbone).to(device)
     student.eval()
     prefix_head.eval()
 
     # Extract image condition & generate 1-step soft prefix
-    dummy_img = torch.randn(1, 3, 224, 224, device=device)
+    image = load_rgb_image(args.image).unsqueeze(0).to(device)
     with torch.no_grad():
-        c = vision_encoder(dummy_img)
+        c = vision_encoder(image, gsd=float(cfg.models.fixed_gsd))
         mask = prefix_head.predict_mask(c)
         eps = torch.randn(1, cfg.models.max_prefix_length, cfg.models.llm_dim, device=device)
-        soft_prefix = student(eps, torch.ones(1, device=device), c, mask=mask)
+        soft_prefix_white = student(eps, torch.ones(1, device=device), c, mask=mask)
+        normalizer = FeatureCache(cfg.cache_dir).load_cache(
+            {
+                "vision_backbone": cfg.models.vision_backbone,
+                "llm_backbone": cfg.models.llm_backbone,
+                "token_storage": "compact_indices",
+            }
+        )["whitening_normalizer"].to(device)
+        soft_prefix = normalizer.unnormalize(soft_prefix_white, mask=mask)
 
     answer = llm_wrapper.generate_answer(
         prefix_embeddings=soft_prefix,

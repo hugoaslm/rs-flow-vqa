@@ -65,7 +65,7 @@ class PrefixLengthClassifier(nn.Module):
         """
         return self.net(c)
 
-    def predict_mask(self, c: torch.Tensor, threshold: float = 0.0) -> torch.Tensor:
+    def predict_mask(self, c: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         """Predict binary mask M in {0, 1}^32 for distillation/inference.
 
         Args:
@@ -77,7 +77,7 @@ class PrefixLengthClassifier(nn.Module):
         logits = self.forward(c)
         probs = torch.sigmoid(logits)
         # Ensure at least 1 valid token
-        mask = (probs > 0.5).float()
+        mask = (probs > threshold).float()
         # Ensure prefix continuity (1s followed by 0s)
         cum_mask = torch.cumprod(mask, dim=-1)
         # Force position 0 to always be 1

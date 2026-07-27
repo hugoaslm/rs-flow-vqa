@@ -9,6 +9,7 @@ from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
 from rs_flow_vqa.cli import cache_features_cmd
 import argparse
+from pathlib import Path
 
 
 def test_end2end_pipeline_smoke():
@@ -29,11 +30,11 @@ def test_end2end_pipeline_smoke():
 
         # 2. Train teacher
         teacher_dir = train_teacher_pipeline(cfg)
-        assert (cfg.output_dir + "/teacher_checkpoint/manifest.json")
+        assert (Path(cfg.output_dir) / "teacher_checkpoint" / "manifest.json").is_file()
 
         # 3. Distill FreeFlow student
         freeflow_dir = distill_freeflow_pipeline(cfg)
-        assert (cfg.output_dir + "/freeflow_checkpoint/manifest.json")
+        assert (Path(cfg.output_dir) / "freeflow_checkpoint" / "manifest.json").is_file()
 
         # 4. Evaluate caption
         cap_results = evaluate_caption_pipeline(cfg)

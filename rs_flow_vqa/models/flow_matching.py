@@ -26,15 +26,22 @@ def compute_minibatch_ot_coupling(
         eps_flat = (eps * mask.unsqueeze(-1)).reshape(B, -1)  # [B, K*D]
 
         # Cost matrix [B, B]
-        cost = torch.cdist(y_flat, eps_flat, p=2).pow(2).cpu().numpy()
+        cost = (
+            (y_flat[:, None, :] - eps_flat[None, :, :]).square().sum(-1)
+        ).cpu().numpy()
 
         row_ind, col_ind = linear_sum_assignment(cost)
 
-    # Reorder y, c, and mask according to optimal transport matching
-    # col_ind maps eps_j to target y[col_ind]
-    y_ot = y[col_ind]
-    c_ot = c[col_ind]
-    mask_ot = mask[col_ind]
+    # scipy returns matched (target_row, noise_column) pairs. Build the
+    # target index for every noise column; indexing directly with col_ind is
+    # only correct when the optimal assignment happens to be the identity.
+    target_for_noise = torch.empty(B, dtype=torch.long, device=y.device)
+    target_for_noise[torch.as_tensor(col_ind, device=y.device)] = torch.as_tensor(
+        row_ind, device=y.device
+    )
+    y_ot = y[target_for_noise]
+    c_ot = c[target_for_noise]
+    mask_ot = mask[target_for_noise]
 
     return y_ot, c_ot, mask_ot
 
@@ -63,6 +70,8 @@ def compute_cfm_loss(
     # Apply coupling
     if coupling == "ot":
         y, c, mask = compute_minibatch_ot_coupling(y, eps, c, mask)
+    elif coupling != "independent":
+        raise ValueError(f"Unknown coupling {coupling!r}; expected 'ot' or 'independent'")
 
     # Sample random time t in [0, 1]
     t = torch.rand(B, device=device)  # [B]
@@ -109,7 +118,9 @@ def sample_heun(
     device = c.device
 
     if eps is None:
-        eps = torch.randn(B, 32, 2048, device=device)
+        k = getattr(teacher, "max_prefix_length", mask.shape[1])
+        d = getattr(teacher, "token_dim", 2048)
+        eps = torch.randn(B, k, d, device=device)
 
     x = eps * mask.unsqueeze(-1)
     dt = 1.0 / num_steps

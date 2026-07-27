@@ -55,3 +55,11 @@ def test_freeflow_stop_gradient_behavior():
     for name, p in corrector.named_parameters():
         if p.requires_grad:
             assert p.grad is not None and torch.isfinite(p.grad).all()
+
+    corrector.zero_grad()
+    student.zero_grad()
+    teacher.zero_grad()
+    corr_student_loss.backward()
+    assert any(p.grad is not None for p in student.parameters())
+    assert all(p.grad is None for p in teacher.parameters())
+    assert all(p.grad is None for p in corrector.parameters())

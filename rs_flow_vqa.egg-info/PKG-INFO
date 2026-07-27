@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: rs-flow-vqa
 Version: 0.1.0
 Summary: RS-Flow-VQA: Conditional Flow Matching and FreeFlow Distillation for Remote Sensing VQA
-Requires-Python: >=3.9
+Requires-Python: <3.13,>=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: torch>=2.0.0
 Requires-Dist: transformers>=4.35.0
@@ -12,8 +12,13 @@ Requires-Dist: scipy>=1.10.0
 Requires-Dist: scikit-learn>=1.2.0
 Requires-Dist: pillow>=9.0.0
 Requires-Dist: requests>=2.28.0
-Provides-Extra: dev
-Requires-Dist: pytest>=7.0.0; extra == "dev"
+Provides-Extra: gpu
+Requires-Dist: torchgeo<0.7.0,>=0.6.0; extra == "gpu"
+Requires-Dist: accelerate>=0.27.0; extra == "gpu"
+Requires-Dist: bitsandbytes>=0.42.0; extra == "gpu"
+Provides-Extra: notebook
+Requires-Dist: pandas>=2.0.0; extra == "notebook"
+Requires-Dist: jupyter>=1.0.0; extra == "notebook"
 
 # RS-Flow-VQA: Conditional Flow Matching and FreeFlow Distillation
 
@@ -34,43 +39,78 @@ RS-Flow-VQA presents a reproducible pipeline that maps frozen **Scale-MAE** imag
 ```bash
 git clone https://github.com/user/rs-flow-vqa.git
 cd rs-flow-vqa
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync --extra gpu --extra notebook
 ```
+
+`uv` creates and manages `.venv` from `pyproject.toml` and `uv.lock`.
+For a lightweight CPU-only development environment, run `uv sync`.
 
 ## CLI Usage & Commands
 
 ```bash
 # 1. Prepare RSICD dataset
-python -m rs_flow_vqa prepare-rsicd --config configs/t4.yaml
+uv run rs-flow-vqa prepare-rsicd --config configs/t4.yaml
 
 # 2. Extract and cache features
-python -m rs_flow_vqa cache-features --config configs/t4.yaml
+uv run rs-flow-vqa cache-features --config configs/t4.yaml
 
 # 3. Train Conditional Flow Matching Teacher
-python -m rs_flow_vqa train-teacher --config configs/t4.yaml
+uv run rs-flow-vqa train-teacher --config configs/t4.yaml
 
 # 4. Target-Free FreeFlow Distillation
-python -m rs_flow_vqa distill-freeflow --config configs/t4.yaml
+uv run rs-flow-vqa distill-freeflow --config configs/t4.yaml
 
 # 5. Evaluate Caption Generation & Fidelity
-python -m rs_flow_vqa evaluate-caption --config configs/t4.yaml
+uv run rs-flow-vqa evaluate-caption --config configs/t4.yaml
 
 # 6. Evaluate Zero-Shot VQA Transfer on RSVQA-LR
-python -m rs_flow_vqa evaluate-rsvqa --config configs/t4.yaml
+uv run rs-flow-vqa evaluate-rsvqa --config configs/t4.yaml
 
 # 7. Answer VQA Question for single image
-python -m rs_flow_vqa answer --image /path/to/image.tif --question "Is there a river?" --checkpoint outputs/t4_run/freeflow_checkpoint
+uv run rs-flow-vqa answer --image /path/to/image.tif --question "Is there a river?" --checkpoint outputs/t4_run/freeflow_checkpoint
 ```
 
-Use `--smoke` flag for fast dry-runs:
+Use `--smoke` for an explicitly synthetic CPU integrity check. Smoke outputs
+are never valid research results:
 ```bash
-python -m rs_flow_vqa train-teacher --smoke
+uv run rs-flow-vqa train-teacher --smoke
 ```
+
+## Dataset layout
+
+Real runs never synthesize missing data. Place RSICD at:
+
+```text
+data/RSICD/
+├── dataset_rsicd.json
+└── RSICD_images/
+```
+
+Place the official RSVQA-LR split files and extracted images at:
+
+```text
+data/RSVQA_LR/
+├── LR_split_test_questions.json
+├── LR_split_test_answers.json
+├── LR_split_test_images.json
+└── Images_LR/
+```
+
+The legacy combined `lr_questions_answers.json` format is also supported.
+`cache-features` downloads the configured pretrained Scale-MAE and Qwen
+checkpoints, processes every RSICD image once, stores compact token-table
+indices, and records the exact cache contract in its manifest.
+
+## Method fidelity
+
+The FreeFlow stage uses cached *training-split image conditions* but no images,
+captions, caption lengths, or target embeddings. It implements the paper's
+discrete prediction surrogate with stop-gradient targets and its online
+conditional noising-field correction. Evaluation refuses to run with missing
+checkpoints or incompatible cache manifests.
 
 ## Running Automated Tests
 
 ```bash
-pytest -v
+uv run pytest -v
 ```

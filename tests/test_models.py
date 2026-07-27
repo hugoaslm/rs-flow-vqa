@@ -9,7 +9,7 @@ from rs_flow_vqa.models.freeflow import FreeFlowStudent
 
 def test_frozen_backbones_receive_no_gradients():
     """Verify that frozen ScaleMAEEncoder has no parameters requiring grad."""
-    encoder = ScaleMAEEncoder()
+    encoder = ScaleMAEEncoder(smoke=True)
     for name, p in encoder.named_parameters():
         assert not p.requires_grad, f"Parameter {name} in vision encoder requires grad!"
 

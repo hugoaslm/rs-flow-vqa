@@ -13,6 +13,7 @@ from rs_flow_vqa.models.flow_matching import sample_heun
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.evaluation.metrics import compute_bleu, compute_rouge_l, compute_cosine_similarity
 from rs_flow_vqa.evaluation.latency import measure_bridge_latency
+from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 
 
 def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
@@ -25,7 +26,13 @@ def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
     if not cache.exists():
         raise FileNotFoundError(f"Feature cache missing at {cfg.cache_dir}")
 
-    cache_data = cache.load_cache()
+    cache_data = cache.load_cache(
+        {
+            "vision_backbone": cfg.models.vision_backbone,
+            "llm_backbone": cfg.models.llm_backbone,
+            "token_storage": "compact_indices",
+        }
+    )
     image_features = cache_data["image_features"]
     caption_token_ids = cache_data["caption_token_ids"]
     caption_lengths = cache_data["caption_lengths"]
@@ -67,40 +74,65 @@ def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
         hidden_dim=cfg.bridge.hidden_dim,
     ).to(device)
 
-    if teacher_ckpt.exists():
-        load_checkpoint(str(teacher_ckpt), {"teacher": teacher, "prefix_head": prefix_head}, device=str(device))
-    if student_ckpt.exists():
-        load_checkpoint(str(student_ckpt), {"student_ema": student_backbone}, device=str(device))
+    if not (teacher_ckpt / "model_weights.safetensors").exists():
+        raise FileNotFoundError(f"Teacher checkpoint missing at {teacher_ckpt}")
+    if not (student_ckpt / "model_weights.safetensors").exists():
+        raise FileNotFoundError(f"Student checkpoint missing at {student_ckpt}")
+    load_checkpoint(str(teacher_ckpt), {"teacher": teacher, "prefix_head": prefix_head}, device=str(device))
+    load_checkpoint(str(student_ckpt), {"student_ema": student_backbone}, device=str(device))
 
     teacher.eval()
     student_backbone.eval()
     prefix_head.eval()
     student = FreeFlowStudent(student_backbone).to(device)
 
-    # Pick evaluation samples
-    eval_num = min(50, caption_token_ids.shape[0])
-    sample_indices = torch.arange(eval_num)
+    test_images = {
+        i
+        for i, metadata in enumerate(cache_data["image_metadata"])
+        if metadata.get("split") == "test"
+    }
+    test_caption_indices = [
+        i for i, image_index in enumerate(caption_to_img_idx.tolist())
+        if image_index in test_images
+    ]
+    if not test_caption_indices:
+        raise RuntimeError("Cache contains no RSICD test captions")
+    sample_indices = test_caption_indices[:50]
+    eval_num = len(sample_indices)
+    llm = QwenSoftPrefixWrapper(
+        device=str(device),
+        model_name=cfg.models.llm_backbone,
+        smoke=cfg.is_smoke,
+    )
 
     teacher_mse_list = []
     student_mse_list = []
     teacher_student_mse_list = []
     teacher_student_cos_list = []
+    oracle_bleu = []
+    teacher_bleu = []
+    student_bleu = []
+    oracle_rouge = []
+    teacher_rouge = []
+    student_rouge = []
 
-    for i in range(eval_num):
+    for local_i, i in enumerate(sample_indices):
         cap_ids = caption_token_ids[i].unsqueeze(0).to(device)
-        cap_len = caption_lengths[i].item()
-        img_idx = caption_to_img_idx[i].item()
+        cap_len = int(caption_lengths[i])
+        img_idx = int(caption_to_img_idx[i])
         c = image_features[img_idx:img_idx+1].to(device)
+        true_mask = torch.zeros(1, cfg.models.max_prefix_length, device=device)
+        true_mask[:, :cap_len] = 1
 
         with torch.no_grad():
             mask = prefix_head.predict_mask(c)
 
         # Target oracle whitening
         gt_embeds = torch.nn.functional.embedding(cap_ids, unique_token_embeds.to(device))
-        gt_white = normalizer.normalize(gt_embeds, mask=mask)
+        gt_white = normalizer.normalize(gt_embeds, mask=true_mask)
 
         # Noise sample
-        g = torch.Generator(device=device).manual_seed(42 + i)
+        g = torch.Generator(device=device).manual_seed(42 + local_i)
         eps = torch.randn(1, cfg.models.max_prefix_length, cfg.models.llm_dim, device=device, generator=g)
 
         # 16-NFE Teacher
@@ -110,12 +142,13 @@ def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
         # 1-step Student
         s_1 = student(eps, torch.ones(1, device=device), c, mask=mask)
 
+        target_mask_exp = true_mask.unsqueeze(-1)
+        valid_elems = max(1.0, target_mask_exp.sum().item() * 2048)
+
+        t_mse = ((t_16 - gt_white).pow(2) * target_mask_exp).sum().item() / valid_elems
+        s_mse = ((s_1 - gt_white).pow(2) * target_mask_exp).sum().item() / valid_elems
+
         mask_exp = mask.unsqueeze(-1)
-        valid_elems = max(1.0, mask_exp.sum().item() * 2048)
-
-        t_mse = ((t_16 - gt_white).pow(2) * mask_exp).sum().item() / valid_elems
-        s_mse = ((s_1 - gt_white).pow(2) * mask_exp).sum().item() / valid_elems
-
         ts_mse = ((s_1 - t_32).pow(2) * mask_exp).sum().item() / valid_elems
         ts_cos = compute_cosine_similarity(s_1[0], t_32[0], mask=mask[0])
 
@@ -123,6 +156,25 @@ def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
         student_mse_list.append(s_mse)
         teacher_student_mse_list.append(ts_mse)
         teacher_student_cos_list.append(ts_cos)
+
+        reference_ids = cache_data["unique_token_ids"][cap_ids[0, :cap_len].cpu()]
+        if llm.tokenizer is not None:
+            reference = llm.tokenizer.decode(reference_ids.tolist(), skip_special_tokens=True)
+        else:
+            reference = "synthetic reference caption"
+        question = ["Describe this remote-sensing image in one short sentence."]
+        oracle_prefix = normalizer.unnormalize(gt_white, mask=true_mask)
+        teacher_prefix = normalizer.unnormalize(t_16, mask=mask)
+        student_prefix = normalizer.unnormalize(s_1, mask=mask)
+        oracle_text = llm.generate_answer(oracle_prefix, question, true_mask, max_new_tokens=32)[0]
+        teacher_text = llm.generate_answer(teacher_prefix, question, mask, max_new_tokens=32)[0]
+        student_text = llm.generate_answer(student_prefix, question, mask, max_new_tokens=32)[0]
+        oracle_bleu.append(compute_bleu(reference, oracle_text, n=1))
+        teacher_bleu.append(compute_bleu(reference, teacher_text, n=1))
+        student_bleu.append(compute_bleu(reference, student_text, n=1))
+        oracle_rouge.append(compute_rouge_l(reference, oracle_text))
+        teacher_rouge.append(compute_rouge_l(reference, teacher_text))
+        student_rouge.append(compute_rouge_l(reference, student_text))
 
     # Measure latency
     c_lat = image_features[:1].to(device)
@@ -143,6 +195,12 @@ def evaluate_caption_pipeline(cfg: Config) -> Dict[str, Any]:
         "student_1step_mse": float(sum(student_mse_list) / len(student_mse_list)),
         "fidelity_student_vs_teacher32_mse": float(sum(teacher_student_mse_list) / len(teacher_student_mse_list)),
         "fidelity_student_vs_teacher32_cosine": float(sum(teacher_student_cos_list) / len(teacher_student_cos_list)),
+        "oracle_prefix_bleu1": float(sum(oracle_bleu) / len(oracle_bleu)),
+        "teacher_prefix_bleu1": float(sum(teacher_bleu) / len(teacher_bleu)),
+        "student_prefix_bleu1": float(sum(student_bleu) / len(student_bleu)),
+        "oracle_prefix_rouge_l": float(sum(oracle_rouge) / len(oracle_rouge)),
+        "teacher_prefix_rouge_l": float(sum(teacher_rouge) / len(teacher_rouge)),
+        "student_prefix_rouge_l": float(sum(student_rouge) / len(student_rouge)),
         "teacher_16nfe_latency_ms": teacher_lat["avg_latency_ms"],
         "student_1step_latency_ms": student_lat["avg_latency_ms"],
     }

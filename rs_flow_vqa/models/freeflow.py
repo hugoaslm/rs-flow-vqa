@@ -42,6 +42,15 @@ class FreeFlowStudent(nn.Module):
             out = out * mask.unsqueeze(-1)
         return out
 
+    def average_velocity(
+        self,
+        eps: torch.Tensor,
+        delta: torch.Tensor,
+        c: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.backbone(eps, delta, c, mask=mask)
+
 
 class EMA:
     """Exponential Moving Average of model parameters."""
@@ -83,37 +92,39 @@ def compute_prediction_loss(
     B = c.shape[0]
     device = c.device
     h = 1.0 / n_intervals
+    K = mask.shape[1]
+    D = getattr(student.backbone, "token_dim", 2048)
 
     # Sample noise eps ~ N(0, I)
-    eps = torch.randn(B, 32, 2048, device=device)
+    eps = torch.randn(B, K, D, device=device) * mask.unsqueeze(-1)
 
     # Randomly select interval index k in {0, ..., N-1}
     k_idx = torch.randint(0, n_intervals, (B,), device=device)
     delta = k_idx.float() * h  # [B]
     delta_next = delta + h  # [B]
 
-    # Evaluate student at delta
-    f_delta = student(eps, delta, c, mask=mask)
+    F_delta = student.average_velocity(eps, delta, c, mask=mask)
+    F_delta_next = student.average_velocity(eps, delta_next, c, mask=mask)
+    f_delta = eps + delta[:, None, None] * F_delta
+    f_delta = f_delta * mask.unsqueeze(-1)
 
-    # Evaluate student at delta + h
-    f_delta_next = student(eps, delta_next, c, mask=mask)
-
-    # Finite difference velocity
-    v_student = (f_delta_next - f_delta) / h  # [B, 32, 2048]
-
-    # Teacher velocity target evaluated at intermediate state with stop-gradient
+    # Eq. (discrete prediction) from FreeFlow. Only the leading F(delta+h)
+    # remains on the gradient path; the finite-difference/teacher target is
+    # stop-gradient. Its value equals the generating-velocity discrepancy.
     with torch.no_grad():
-        x_mid = f_delta.detach()
         t_teacher = 1.0 - delta  # Time convention: t=1 at noise, t=0 at data
-        v_target = teacher(x_mid, t_teacher, c, mask=mask)
-
-    # Masked discrepancy loss
-    diff_sq = (v_student - v_target).pow(2)
+        v_target = teacher(f_delta.detach(), t_teacher, c, mask=mask)
+        correction = (
+            delta[:, None, None] * (F_delta_next.detach() - F_delta.detach()) / h
+            - v_target
+        )
+    residual = F_delta_next + correction
     mask_expand = mask.unsqueeze(-1)
-    masked_diff = diff_sq * mask_expand
-
-    valid_count = torch.clamp(mask_expand.sum() * 2048, min=1.0)
-    loss = masked_diff.sum() / valid_count
+    per_sample = (residual.square() * mask_expand).sum((1, 2))
+    valid_per_sample = (mask.sum(1) * D).clamp_min(1.0)
+    normalized_sq_norm = per_sample.detach() / valid_per_sample
+    weight = (normalized_sq_norm + 1e-4).pow(-k_norm_exp)
+    loss = (weight * per_sample / valid_per_sample).mean()
 
     metrics = {
         "pred_loss": float(loss.item()),
@@ -141,6 +152,8 @@ def compute_correction_losses(
     """
     B = c.shape[0]
     device = c.device
+    K = mask.shape[1]
+    D = getattr(student.backbone, "token_dim", 2048)
 
     # Calculate schedule weight for correction warmup
     if step_ratio < delay_ratio:
@@ -151,7 +164,7 @@ def compute_correction_losses(
         schedule_weight = 1.0
 
     # 1. Student endpoint y_hat = f_theta(eps, 1, c)
-    eps = torch.randn(B, 32, 2048, device=device)
+    eps = torch.randn(B, K, D, device=device) * mask.unsqueeze(-1)
     delta_ones = torch.ones(B, device=device)
     y_hat = student(eps, delta_ones, c, mask=mask)
 
@@ -163,8 +176,6 @@ def compute_correction_losses(
 
     x_r = (1.0 - r_expand) * y_hat + r_expand * n
     x_r = x_r * mask.unsqueeze(-1)
-    target_noising_vel = y_hat - n
-
     # 3. Auxiliary corrector loss (stop gradients through y_hat)
     y_hat_detached = y_hat.detach()
     x_r_aux = (1.0 - r_expand) * y_hat_detached + r_expand * n
@@ -174,27 +185,40 @@ def compute_correction_losses(
     target_aux = y_hat_detached - n
 
     mask_expand = mask.unsqueeze(-1)
-    valid_count = torch.clamp(mask_expand.sum() * 2048, min=1.0)
+    valid_count = torch.clamp(mask_expand.sum() * D, min=1.0)
     aux_loss = ((g_pred - target_aux).pow(2) * mask_expand).sum() / valid_count
 
     # 4. Student correction loss
-    # Compute adaptive weight lambda = alpha * E[|Delta_G,phi|] / (E[|Delta_N,phi|] + 1e-6)
+    # FreeFlow correction gradient:
+    #   grad E[F_theta(eps,1,c)^T sg(v_N(x_r,r,c)-v_phi(x_r,r,c))]
+    # The teacher is evaluated at r because x_r=(1-r)y+r*n is at noise time r.
     with torch.no_grad():
-        v_teacher_xr = teacher(x_r.detach(), 1.0 - r, c, mask=mask)
+        v_teacher_xr = teacher(x_r.detach(), r, c, mask=mask)
         g_corrector_xr = corrector(x_r.detach(), r, c, mask=mask)
+        delta_n_phi = (
+            (g_corrector_xr - v_teacher_xr).square() * mask_expand
+        ).sum((1, 2)).sqrt().mean()
 
-        delta_g_phi = (g_corrector_xr - v_teacher_xr).abs().mean()
-        # Delta_N,phi baseline gradient magnitude approximation
-        delta_n_phi = (v_teacher_xr - target_noising_vel).abs().mean()
+        # Estimate the prediction/generating discrepancy used by the paper's
+        # adaptive balance on a short finite-difference segment.
+        h = 1.0 / 8.0
+        delta_probe = torch.rand(B, device=device) * (1.0 - h)
+        f0 = student(eps, delta_probe, c, mask=mask)
+        f1 = student(eps, delta_probe + h, c, mask=mask)
+        v_g = (f1 - f0) / h
+        v_u = teacher(f0, 1.0 - delta_probe, c, mask=mask)
+        delta_g_phi = (
+            (v_g - v_u).square() * mask_expand
+        ).sum((1, 2)).sqrt().mean()
         adaptive_lambda = alpha_corr * (delta_g_phi / (delta_n_phi + 1e-6))
 
     effective_weight = float(adaptive_lambda.item()) * schedule_weight
 
-    # Discrepancy alignment loss pushing student endpoint through x_r
-    v_teacher = teacher(x_r, 1.0 - r, c, mask=mask)
-    g_corr_detach = corrector(x_r, r, c, mask=mask).detach()
-
-    corr_student_loss = ((v_teacher - g_corr_detach).pow(2) * mask_expand).sum() / valid_count
+    discrepancy = (g_corrector_xr - v_teacher_xr).detach()
+    F_terminal = student.average_velocity(
+        eps, torch.ones(B, device=device), c, mask=mask
+    )
+    corr_student_loss = (F_terminal * discrepancy * mask_expand).sum() / valid_count
     total_corr_student_loss = effective_weight * corr_student_loss
 
     metrics = {

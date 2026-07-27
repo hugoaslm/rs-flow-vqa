@@ -13,11 +13,43 @@ class QwenSoftPrefixWrapper:
         llm_model: Optional[nn.Module] = None,
         tokenizer: Optional[Any] = None,
         device: str = "cpu",
+        model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+        smoke: bool = False,
     ) -> None:
+        self.device = torch.device(device)
+        self.embedding_dim = 2048
+        self.smoke = smoke
+
+        if llm_model is None and not smoke:
+            try:
+                from transformers import (
+                    AutoModelForCausalLM,
+                    AutoTokenizer,
+                    BitsAndBytesConfig,
+                )
+            except ImportError as exc:
+                raise RuntimeError("Real Qwen inference requires transformers") from exc
+            tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            kwargs: Dict[str, Any] = {"low_cpu_mem_usage": True}
+            if self.device.type == "cuda":
+                kwargs.update(
+                    device_map="auto",
+                    quantization_config=BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                    ),
+                )
+            else:
+                kwargs["torch_dtype"] = torch.float32
+            llm_model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+            if self.device.type != "cuda":
+                llm_model = llm_model.to(self.device)
+            llm_model.eval()
+            for parameter in llm_model.parameters():
+                parameter.requires_grad_(False)
+
         self.llm_model = llm_model
         self.tokenizer = tokenizer
-        self.device = device
-        self.embedding_dim = 2048
 
     def format_chat_embeddings(
         self,
@@ -68,7 +100,7 @@ class QwenSoftPrefixWrapper:
                 suff_embeds = torch.randn(L2, D, device=device, generator=g)
 
             # Continuous soft-prefix embeddings for batch sample b
-            soft_pref = prefix_embeddings[b]  # [K, 2048]
+            soft_pref = prefix_embeddings[b].to(dtype=pref_embeds.dtype)
             if prefix_mask is not None:
                 # Keep only valid prefix positions
                 valid_k = int(prefix_mask[b].sum().item())
@@ -87,7 +119,9 @@ class QwenSoftPrefixWrapper:
 
         # Pad sequences to max length in batch if lengths differ
         max_len = max(emb.shape[0] for emb in all_inputs_embeds)
-        padded_embeds = torch.zeros(B, max_len, D, device=device)
+        padded_embeds = torch.zeros(
+            B, max_len, D, device=device, dtype=all_inputs_embeds[0].dtype
+        )
         padded_attn = torch.zeros(B, max_len, dtype=torch.long, device=device)
         padded_pos = torch.zeros(B, max_len, dtype=torch.long, device=device)
 
@@ -109,6 +143,8 @@ class QwenSoftPrefixWrapper:
     ) -> list[str]:
         """Generate short answer phrase for RSVQA evaluation."""
         if self.llm_model is None or self.tokenizer is None:
+            if not self.smoke:
+                raise RuntimeError("Qwen model/tokenizer are unavailable outside smoke mode")
             # Fallback mock answer for testing / smoke mode
             return ["yes" if "Is" in q else "5" for q in questions]
 
@@ -122,7 +158,6 @@ class QwenSoftPrefixWrapper:
             position_ids=position_ids,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            temperature=0.0,
             pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
         )
 

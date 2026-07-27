@@ -15,6 +15,8 @@ from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 from rs_flow_vqa.evaluation.metrics import compute_vqa_accuracy
 from rs_flow_vqa.data.whitening import WhiteningNormalizer
+from rs_flow_vqa.data.caching import FeatureCache
+from rs_flow_vqa.models.backbones import load_rgb_image
 
 
 def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
@@ -30,8 +32,14 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
     )
 
     # 1. Backbones
-    vision_encoder = ScaleMAEEncoder(model_name=cfg.models.vision_backbone, device=str(device)).to(device)
-    llm_wrapper = QwenSoftPrefixWrapper(device=str(device))
+    vision_encoder = ScaleMAEEncoder(
+        model_name=cfg.models.vision_backbone,
+        device=str(device),
+        smoke=cfg.is_smoke,
+    ).to(device)
+    llm_wrapper = QwenSoftPrefixWrapper(
+        device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
+    )
 
     # 2. Checkpoints
     teacher_ckpt = Path(cfg.output_dir) / "teacher_checkpoint"
@@ -67,18 +75,26 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
         hidden_dim=cfg.bridge.hidden_dim,
     ).to(device)
 
-    if teacher_ckpt.exists():
-        load_checkpoint(str(teacher_ckpt), {"teacher": teacher, "prefix_head": prefix_head}, device=str(device))
-    if student_ckpt.exists():
-        load_checkpoint(str(student_ckpt), {"student_ema": student_backbone}, device=str(device))
+    if not (teacher_ckpt / "model_weights.safetensors").exists():
+        raise FileNotFoundError(f"Teacher checkpoint missing at {teacher_ckpt}")
+    if not (student_ckpt / "model_weights.safetensors").exists():
+        raise FileNotFoundError(f"Student checkpoint missing at {student_ckpt}")
+    load_checkpoint(str(teacher_ckpt), {"teacher": teacher, "prefix_head": prefix_head}, device=str(device))
+    load_checkpoint(str(student_ckpt), {"student_ema": student_backbone}, device=str(device))
 
     teacher.eval()
     student_backbone.eval()
     prefix_head.eval()
     student = FreeFlowStudent(student_backbone).to(device)
 
-    # Whitening normalizer (default zero mean, unit std if offline)
-    normalizer = WhiteningNormalizer(mean=torch.zeros(2048), std=torch.ones(2048)).to(device)
+    cache = FeatureCache(cfg.cache_dir)
+    normalizer = cache.load_cache(
+        {
+            "vision_backbone": cfg.models.vision_backbone,
+            "llm_backbone": cfg.models.llm_backbone,
+            "token_storage": "compact_indices",
+        }
+    )["whitening_normalizer"].to(device)
 
     # Cache image features & soft prefixes for each unique image
     unique_images = rsvqa_ds.get_unique_image_paths()
@@ -87,10 +103,9 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
     print(f"Caching vision features & soft-prefixes for {len(unique_images)} unique images...")
 
     for img_id, img_path, gsd in unique_images:
-        # Load image or generate synthetic image tensor
-        dummy_img = torch.randn(1, 3, 224, 224, device=device)
+        image = load_rgb_image(img_path).unsqueeze(0).to(device)
         with torch.no_grad():
-            c = vision_encoder(dummy_img, gsd=gsd)  # [1, 1024]
+            c = vision_encoder(image, gsd=gsd)  # [1, 1024]
             mask = prefix_head.predict_mask(c)  # [1, 32]
 
             # Generate 16-NFE teacher prefix and 1-step student prefix
