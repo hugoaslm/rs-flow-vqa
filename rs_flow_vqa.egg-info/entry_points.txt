@@ -1,0 +1,2 @@
+[console_scripts]
+rs-flow-vqa = rs_flow_vqa.cli:main

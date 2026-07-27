@@ -1,0 +1,59 @@
+# Fast Smoke Test Configuration for CPU / Mock GPU validation
+
+experiment_name: "smoke_rs_flow_vqa"
+seed: 42
+device: "cpu"
+precision: "fp32"
+output_dir: "./outputs/smoke_run"
+cache_dir: "./data/smoke_cache"
+
+models:
+  vision_backbone: "scale_mae_vit_l"
+  vision_dim: 1024
+  llm_backbone: "Qwen/Qwen2.5-3B-Instruct"
+  llm_dim: 2048
+  max_prefix_length: 32
+  fixed_gsd: 1.0
+
+bridge:
+  hidden_dim: 256
+  num_layers: 2
+  num_heads: 4
+  mlp_dim: 512
+  num_cond_tokens: 4
+  dropout: 0.0
+
+teacher:
+  batch_size: 4
+  grad_accum_steps: 1
+  total_steps: 20
+  lr: 0.001
+  warmup_steps: 5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  coupling: "ot"
+  evaluation_nfes: [4, 8]
+
+distillation:
+  batch_size: 4
+  grad_accum_steps: 1
+  total_steps: 20
+  student_lr: 0.0003
+  auxiliary_lr: 0.001
+  adam_betas: [0.9, 0.99]
+  ema_decay: 0.99
+  n_intervals: 4
+  k_norm_exp: 1.0
+  alpha_corr: 0.3
+  corr_delay_ratio: 0.10
+  corr_warmup_ratio: 0.10
+  pred_prob: 0.75
+
+data:
+  rsicd_data_dir: "./data/RSICD"
+  rsvqa_data_dir: "./data/RSVQA_LR"
+  captions_per_image: 5
+
+evaluation:
+  rsvqa_subset_fraction: 0.10
+  eval_seeds: [42]

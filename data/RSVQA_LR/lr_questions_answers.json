@@ -1,0 +1,454 @@
+{
+  "questions": [
+    {
+      "id": 0,
+      "img_id": 0,
+      "image_filename": "rsvqa_0000.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 1,
+      "img_id": 0,
+      "image_filename": "rsvqa_0000.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 2,
+      "img_id": 0,
+      "image_filename": "rsvqa_0000.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "val"
+    },
+    {
+      "id": 3,
+      "img_id": 0,
+      "image_filename": "rsvqa_0000.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "val"
+    },
+    {
+      "id": 4,
+      "img_id": 0,
+      "image_filename": "rsvqa_0000.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "val"
+    },
+    {
+      "id": 10,
+      "img_id": 1,
+      "image_filename": "rsvqa_0001.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 11,
+      "img_id": 1,
+      "image_filename": "rsvqa_0001.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 12,
+      "img_id": 1,
+      "image_filename": "rsvqa_0001.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "val"
+    },
+    {
+      "id": 13,
+      "img_id": 1,
+      "image_filename": "rsvqa_0001.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "val"
+    },
+    {
+      "id": 14,
+      "img_id": 1,
+      "image_filename": "rsvqa_0001.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "val"
+    },
+    {
+      "id": 20,
+      "img_id": 2,
+      "image_filename": "rsvqa_0002.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 21,
+      "img_id": 2,
+      "image_filename": "rsvqa_0002.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 22,
+      "img_id": 2,
+      "image_filename": "rsvqa_0002.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "val"
+    },
+    {
+      "id": 23,
+      "img_id": 2,
+      "image_filename": "rsvqa_0002.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "val"
+    },
+    {
+      "id": 24,
+      "img_id": 2,
+      "image_filename": "rsvqa_0002.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "val"
+    },
+    {
+      "id": 30,
+      "img_id": 3,
+      "image_filename": "rsvqa_0003.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 31,
+      "img_id": 3,
+      "image_filename": "rsvqa_0003.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 32,
+      "img_id": 3,
+      "image_filename": "rsvqa_0003.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "val"
+    },
+    {
+      "id": 33,
+      "img_id": 3,
+      "image_filename": "rsvqa_0003.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "val"
+    },
+    {
+      "id": 34,
+      "img_id": 3,
+      "image_filename": "rsvqa_0003.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "val"
+    },
+    {
+      "id": 40,
+      "img_id": 4,
+      "image_filename": "rsvqa_0004.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 41,
+      "img_id": 4,
+      "image_filename": "rsvqa_0004.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "val"
+    },
+    {
+      "id": 42,
+      "img_id": 4,
+      "image_filename": "rsvqa_0004.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "val"
+    },
+    {
+      "id": 43,
+      "img_id": 4,
+      "image_filename": "rsvqa_0004.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "val"
+    },
+    {
+      "id": 44,
+      "img_id": 4,
+      "image_filename": "rsvqa_0004.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "val"
+    },
+    {
+      "id": 50,
+      "img_id": 5,
+      "image_filename": "rsvqa_0005.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 51,
+      "img_id": 5,
+      "image_filename": "rsvqa_0005.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 52,
+      "img_id": 5,
+      "image_filename": "rsvqa_0005.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "test"
+    },
+    {
+      "id": 53,
+      "img_id": 5,
+      "image_filename": "rsvqa_0005.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "test"
+    },
+    {
+      "id": 54,
+      "img_id": 5,
+      "image_filename": "rsvqa_0005.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "test"
+    },
+    {
+      "id": 60,
+      "img_id": 6,
+      "image_filename": "rsvqa_0006.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 61,
+      "img_id": 6,
+      "image_filename": "rsvqa_0006.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 62,
+      "img_id": 6,
+      "image_filename": "rsvqa_0006.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "test"
+    },
+    {
+      "id": 63,
+      "img_id": 6,
+      "image_filename": "rsvqa_0006.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "test"
+    },
+    {
+      "id": 64,
+      "img_id": 6,
+      "image_filename": "rsvqa_0006.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "test"
+    },
+    {
+      "id": 70,
+      "img_id": 7,
+      "image_filename": "rsvqa_0007.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 71,
+      "img_id": 7,
+      "image_filename": "rsvqa_0007.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 72,
+      "img_id": 7,
+      "image_filename": "rsvqa_0007.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "test"
+    },
+    {
+      "id": 73,
+      "img_id": 7,
+      "image_filename": "rsvqa_0007.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "test"
+    },
+    {
+      "id": 74,
+      "img_id": 7,
+      "image_filename": "rsvqa_0007.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "test"
+    },
+    {
+      "id": 80,
+      "img_id": 8,
+      "image_filename": "rsvqa_0008.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 81,
+      "img_id": 8,
+      "image_filename": "rsvqa_0008.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 82,
+      "img_id": 8,
+      "image_filename": "rsvqa_0008.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "test"
+    },
+    {
+      "id": 83,
+      "img_id": 8,
+      "image_filename": "rsvqa_0008.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "test"
+    },
+    {
+      "id": 84,
+      "img_id": 8,
+      "image_filename": "rsvqa_0008.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "test"
+    },
+    {
+      "id": 90,
+      "img_id": 9,
+      "image_filename": "rsvqa_0009.tif",
+      "question": "Is there a river?",
+      "answer": "yes",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 91,
+      "img_id": 9,
+      "image_filename": "rsvqa_0009.tif",
+      "question": "Is there a stadium?",
+      "answer": "no",
+      "type": "presence",
+      "split": "test"
+    },
+    {
+      "id": 92,
+      "img_id": 9,
+      "image_filename": "rsvqa_0009.tif",
+      "question": "How many buildings are there?",
+      "answer": "5",
+      "type": "count",
+      "split": "test"
+    },
+    {
+      "id": 93,
+      "img_id": 9,
+      "image_filename": "rsvqa_0009.tif",
+      "question": "Are there more trees than buildings?",
+      "answer": "yes",
+      "type": "comparison",
+      "split": "test"
+    },
+    {
+      "id": 94,
+      "img_id": 9,
+      "image_filename": "rsvqa_0009.tif",
+      "question": "Is this an urban or rural area?",
+      "answer": "urban",
+      "type": "rural_urban",
+      "split": "test"
+    }
+  ]
+}

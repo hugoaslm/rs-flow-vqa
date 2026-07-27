@@ -1,0 +1,59 @@
+# Configuration for Single NVIDIA T4 GPU Training (16 GB VRAM)
+
+experiment_name: "t4_rs_flow_vqa"
+seed: 42
+device: "cuda"
+precision: "fp16"
+output_dir: "./outputs/t4_run"
+cache_dir: "./data/cache"
+
+models:
+  vision_backbone: "scale_mae_vit_l"
+  vision_dim: 1024
+  llm_backbone: "Qwen/Qwen2.5-3B-Instruct"
+  llm_dim: 2048
+  max_prefix_length: 32
+  fixed_gsd: 1.0  # Default GSD for RSICD
+
+bridge:
+  hidden_dim: 256
+  num_layers: 4
+  num_heads: 8
+  mlp_dim: 1024
+  num_cond_tokens: 4
+  dropout: 0.1
+
+teacher:
+  batch_size: 16
+  grad_accum_steps: 4
+  total_steps: 20000
+  lr: 0.0002
+  warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  coupling: "ot"  # "ot" or "independent"
+  evaluation_nfes: [16, 32]
+
+distillation:
+  batch_size: 16
+  grad_accum_steps: 4
+  total_steps: 15000
+  student_lr: 0.00003
+  auxiliary_lr: 0.0001
+  adam_betas: [0.9, 0.99]
+  ema_decay: 0.999
+  n_intervals: 8
+  k_norm_exp: 1.0
+  alpha_corr: 0.3
+  corr_delay_ratio: 0.10
+  corr_warmup_ratio: 0.10
+  pred_prob: 0.75
+
+data:
+  rsicd_data_dir: "./data/RSICD"
+  rsvqa_data_dir: "./data/RSVQA_LR"
+  captions_per_image: 5
+
+evaluation:
+  rsvqa_subset_fraction: 0.10
+  eval_seeds: [42, 100, 2024]

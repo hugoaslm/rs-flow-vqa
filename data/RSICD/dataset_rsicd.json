@@ -1,0 +1,544 @@
+{
+  "images": [
+    {
+      "filename": "rsicd_00000.jpg",
+      "imgid": 0,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 0
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 1
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 2
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 3
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 4
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00001.jpg",
+      "imgid": 1,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 5
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 6
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 7
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 8
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 9
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00002.jpg",
+      "imgid": 2,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 10
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 11
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 12
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 13
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 14
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00003.jpg",
+      "imgid": 3,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 15
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 16
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 17
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 18
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 19
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00004.jpg",
+      "imgid": 4,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 20
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 21
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 22
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 23
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 24
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00005.jpg",
+      "imgid": 5,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 25
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 26
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 27
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 28
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 29
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00006.jpg",
+      "imgid": 6,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 30
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 31
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 32
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 33
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 34
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00007.jpg",
+      "imgid": 7,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 35
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 36
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 37
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 38
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 39
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00008.jpg",
+      "imgid": 8,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 40
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 41
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 42
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 43
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 44
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00009.jpg",
+      "imgid": 9,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 45
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 46
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 47
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 48
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 49
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00010.jpg",
+      "imgid": 10,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 50
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 51
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 52
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 53
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 54
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00011.jpg",
+      "imgid": 11,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 55
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 56
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 57
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 58
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 59
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00012.jpg",
+      "imgid": 12,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 60
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 61
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 62
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 63
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 64
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00013.jpg",
+      "imgid": 13,
+      "split": "train",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 65
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 66
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 67
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 68
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 69
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00014.jpg",
+      "imgid": 14,
+      "split": "val",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 70
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 71
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 72
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 73
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 74
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00015.jpg",
+      "imgid": 15,
+      "split": "val",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 75
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 76
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 77
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 78
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 79
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00016.jpg",
+      "imgid": 16,
+      "split": "val",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 80
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 81
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 82
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 83
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 84
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00017.jpg",
+      "imgid": 17,
+      "split": "test",
+      "sentences": [
+        {
+          "raw": "a large airport runway with several airplanes parked.",
+          "sentid": 85
+        },
+        {
+          "raw": "an airport strip with several parked airplanes.",
+          "sentid": 86
+        },
+        {
+          "raw": "airplanes are parked near the long runway.",
+          "sentid": 87
+        },
+        {
+          "raw": "view of an airfield with airplanes and tarmac.",
+          "sentid": 88
+        },
+        {
+          "raw": "a concrete airport runway and multiple planes.",
+          "sentid": 89
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00018.jpg",
+      "imgid": 18,
+      "split": "test",
+      "sentences": [
+        {
+          "raw": "many green trees are in a dense forest area.",
+          "sentid": 90
+        },
+        {
+          "raw": "a vast green forest with many trees.",
+          "sentid": 91
+        },
+        {
+          "raw": "there are lots of green trees in the park.",
+          "sentid": 92
+        },
+        {
+          "raw": "aerial view of a green forest and trees.",
+          "sentid": 93
+        },
+        {
+          "raw": "a lush green woodland with dense trees.",
+          "sentid": 94
+        }
+      ]
+    },
+    {
+      "filename": "rsicd_00019.jpg",
+      "imgid": 19,
+      "split": "test",
+      "sentences": [
+        {
+          "raw": "a blue river flows past several buildings.",
+          "sentid": 95
+        },
+        {
+          "raw": "buildings are located near a long river.",
+          "sentid": 96
+        },
+        {
+          "raw": "a wide river next to residential buildings.",
+          "sentid": 97
+        },
+        {
+          "raw": "aerial image of a river and urban buildings.",
+          "sentid": 98
+        },
+        {
+          "raw": "a blue water body next to white buildings.",
+          "sentid": 99
+        }
+      ]
+    }
+  ]
+}

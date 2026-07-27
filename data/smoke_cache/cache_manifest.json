@@ -1,0 +1,10 @@
+{
+  "num_images": 20,
+  "num_captions": 100,
+  "num_unique_tokens": 1000,
+  "vision_dim": 1024,
+  "llm_dim": 2048,
+  "dataset_fingerprint": "rsicd_v1_hash",
+  "vision_backbone": "scale_mae_vit_l",
+  "llm_backbone": "Qwen/Qwen2.5-3B-Instruct"
+}
