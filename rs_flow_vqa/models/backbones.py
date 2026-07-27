@@ -16,6 +16,20 @@ import torch.nn.functional as F
 from PIL import Image
 
 
+def normalize_scalemae_rgb(images: torch.Tensor) -> torch.Tensor:
+    """Apply the exact RGB normalization used by TorchGeo Scale-MAE weights.
+
+    Applying the two fixed operations directly avoids Kornia's
+    version-sensitive ``AugmentationSequential`` calling convention.
+    """
+    x = images.float()
+    if x.numel() and x.max() > 1:
+        x = x / 255.0
+    mean = x.new_tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
+    std = x.new_tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1)
+    return (x - mean) / std
+
+
 def load_rgb_image(path: str | Path, size: int = 224) -> torch.Tensor:
     """Load an image as a uint8 CHW tensor suitable for TorchGeo weights."""
     with Image.open(path) as image:
@@ -56,7 +70,10 @@ class ScaleMAEEncoder(nn.Module):
                     "Install the project with its 'gpu' dependencies."
                 ) from exc
             weights = ScaleMAELarge16_Weights.FMOW_RGB
-            self.transforms = weights.transforms()
+            # The released transform is simply /255 followed by ImageNet
+            # normalization. Calling its Kornia container directly breaks on
+            # some Colab Kornia versions, so forward() applies it explicitly.
+            self.transforms = None
             self.model = scalemae_large_patch16(
                 weights=weights, num_classes=0, global_pool="avg", res=1.0
             )
@@ -80,11 +97,7 @@ class ScaleMAEEncoder(nn.Module):
                 x = x / 255.0
             return F.normalize(self.model(x), dim=-1)
 
-        # TorchGeo's released transforms expect uint8-like values in [0, 255].
-        x = images
-        if x.dtype != torch.uint8 and x.max() <= 1.0:
-            x = x * 255.0
-        x = self.transforms(x.float())
+        x = normalize_scalemae_rgb(images)
         self.model.res = float(gsd if gsd is not None else 1.0)
         features = self.model(x)
         if features.ndim == 3:

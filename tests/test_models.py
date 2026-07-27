@@ -2,7 +2,11 @@
 
 import torch
 import pytest
-from rs_flow_vqa.models.backbones import ScaleMAEEncoder, QwenEmbeddingWrapper
+from rs_flow_vqa.models.backbones import (
+    QwenEmbeddingWrapper,
+    ScaleMAEEncoder,
+    normalize_scalemae_rgb,
+)
 from rs_flow_vqa.models.bridge import TokenTransformer, PrefixLengthClassifier
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 
@@ -12,6 +16,19 @@ def test_frozen_backbones_receive_no_gradients():
     encoder = ScaleMAEEncoder(smoke=True)
     for name, p in encoder.named_parameters():
         assert not p.requires_grad, f"Parameter {name} in vision encoder requires grad!"
+
+
+def test_scalemae_rgb_normalization_accepts_uint8_and_unit_float():
+    pixels = torch.tensor([[[[0]], [[127]], [[255]]]], dtype=torch.uint8)
+    from_uint8 = normalize_scalemae_rgb(pixels)
+    from_float = normalize_scalemae_rgb(pixels.float() / 255.0)
+
+    assert torch.allclose(from_uint8, from_float)
+    expected = (
+        pixels.float() / 255.0
+        - torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    ) / torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    assert torch.allclose(from_uint8, expected)
 
 
 def test_bridge_transformer_finite_gradients():
