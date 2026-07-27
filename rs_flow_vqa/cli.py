@@ -16,7 +16,11 @@ from rs_flow_vqa.training.distill_freeflow import distill_freeflow_pipeline
 from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
 from rs_flow_vqa.models.backbones import ScaleMAEEncoder, QwenEmbeddingWrapper, load_rgb_image
-from rs_flow_vqa.models.bridge import TokenTransformer, PrefixLengthClassifier
+from rs_flow_vqa.models.bridge import (
+    BRIDGE_ARCHITECTURE_VERSION,
+    PrefixLengthClassifier,
+    TokenTransformer,
+)
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 from rs_flow_vqa.utils.checkpoint import load_checkpoint
@@ -151,14 +155,35 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
             masks[row, :length] = 1
     caption_to_img = torch.tensor(caption_to_img_list, dtype=torch.long)
 
-    # Streaming whitening avoids materializing all [caption, token, 2048]
-    # embeddings (several GB for full RSICD).
+    # Standardize image conditions using training images only. This prevents
+    # the condition MLP from having to absorb backbone-specific scales and
+    # avoids validation/test leakage.
+    train_image_indices = torch.tensor(
+        [i for i, item in enumerate(image_meta) if item["split"] == "train"],
+        dtype=torch.long,
+    )
+    if train_image_indices.numel() < 2:
+        raise RuntimeError("RSICD cache needs at least two training images")
+    train_features = image_features[train_image_indices].float()
+    image_normalizer = WhiteningNormalizer(
+        train_features.mean(0),
+        train_features.std(0, unbiased=False).clamp_min(1e-4),
+    )
+    image_features = image_normalizer.normalize(image_features.float())
+
+    # Streaming target whitening uses training captions only and avoids
+    # materializing all [caption, token, 2048] embeddings.
+    train_caption_mask = torch.tensor(
+        [image_meta[index]["split"] == "train" for index in caption_to_img_list],
+        dtype=torch.bool,
+    )
     count = torch.tensor(0.0, dtype=torch.float64)
     value_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
     square_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
     for start in range(0, len(raw_sequences), 512):
         ids = caption_token_ids[start : start + 512]
         valid = masks[start : start + 512].bool()
+        valid &= train_caption_mask[start : start + 512, None]
         values = torch.nn.functional.embedding(ids, unique_embeds.float())[valid].double()
         count += values.shape[0]
         value_sum += values.sum(0)
@@ -174,6 +199,7 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
     fingerprint.update(dataset_json.read_bytes())
     fingerprint.update(cfg.models.vision_backbone.encode())
     fingerprint.update(cfg.models.llm_backbone.encode())
+    fingerprint.update(b"conditioned_cache_v2")
     manifest_meta = {
         "dataset_fingerprint": fingerprint.hexdigest(),
         "vision_backbone": cfg.models.vision_backbone,
@@ -181,6 +207,9 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
         "token_storage": "compact_indices",
         "max_prefix_length": cfg.models.max_prefix_length,
         "fixed_gsd": float(cfg.models.fixed_gsd),
+        "cache_version": "conditioned_v2",
+        "image_feature_normalization": "train_zscore_v1",
+        "target_feature_normalization": "train_zscore_v1",
     }
 
     cache.save_cache(
@@ -192,6 +221,7 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
         unique_token_ids=unique_ids,
         unique_token_embeds=unique_embeds,
         whitening_normalizer=whitening_norm,
+        image_normalizer=image_normalizer,
         manifest_meta=manifest_meta,
     )
 
@@ -291,6 +321,10 @@ def answer_cmd(args: argparse.Namespace) -> None:
     load_checkpoint(
         args.checkpoint,
         {"student_ema": student_backbone, "prefix_head": prefix_head},
+        expected_manifest={
+            "bridge_architecture": BRIDGE_ARCHITECTURE_VERSION,
+            "model_type": "freeflow_student",
+        },
         device=str(device),
     )
 
@@ -301,17 +335,22 @@ def answer_cmd(args: argparse.Namespace) -> None:
     # Extract image condition & generate 1-step soft prefix
     image = load_rgb_image(args.image).unsqueeze(0).to(device)
     with torch.no_grad():
-        c = vision_encoder(image, gsd=float(cfg.models.fixed_gsd))
-        mask = prefix_head.predict_mask(c)
-        eps = torch.randn(1, cfg.models.max_prefix_length, cfg.models.llm_dim, device=device)
-        soft_prefix_white = student(eps, torch.ones(1, device=device), c, mask=mask)
-        normalizer = FeatureCache(cfg.cache_dir).load_cache(
+        cache_data = FeatureCache(cfg.cache_dir).load_cache(
             {
                 "vision_backbone": cfg.models.vision_backbone,
                 "llm_backbone": cfg.models.llm_backbone,
                 "token_storage": "compact_indices",
+                "cache_version": "conditioned_v2",
+                "image_feature_normalization": "train_zscore_v1",
             }
-        )["whitening_normalizer"].to(device)
+        )
+        c = cache_data["image_normalizer"].to(device).normalize(
+            vision_encoder(image, gsd=float(cfg.models.fixed_gsd))
+        )
+        mask = prefix_head.predict_mask(c)
+        eps = torch.randn(1, cfg.models.max_prefix_length, cfg.models.llm_dim, device=device)
+        soft_prefix_white = student(eps, torch.ones(1, device=device), c, mask=mask)
+        normalizer = cache_data["whitening_normalizer"].to(device)
         soft_prefix = normalizer.unnormalize(soft_prefix_white, mask=mask)
 
     answer = llm_wrapper.generate_answer(

@@ -8,6 +8,7 @@ from rs_flow_vqa.training.distill_freeflow import distill_freeflow_pipeline
 from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
 from rs_flow_vqa.cli import cache_features_cmd
+from rs_flow_vqa.data.caching import FeatureCache
 import argparse
 from pathlib import Path
 
@@ -27,6 +28,13 @@ def test_end2end_pipeline_smoke():
             output_dir=tmp_dir,
         )
         cache_features_cmd(args)
+        cached = FeatureCache(cfg.cache_dir).load_cache(
+            {
+                "cache_version": "conditioned_v2",
+                "image_feature_normalization": "train_zscore_v1",
+            }
+        )
+        assert "image_normalizer" in cached
 
         # 2. Train teacher
         teacher_dir = train_teacher_pipeline(cfg)
@@ -40,8 +48,10 @@ def test_end2end_pipeline_smoke():
         cap_results = evaluate_caption_pipeline(cfg)
         assert "teacher_16nfe_mse" in cap_results
         assert "student_1step_mse" in cap_results
+        assert "endpoint_condition_gap" in cap_results
 
         # 5. Evaluate RSVQA
         rsvqa_results = evaluate_rsvqa_pipeline(cfg)
         assert "text_only_baseline" in rsvqa_results
         assert "student_1step" in rsvqa_results
+        assert "shuffled_image_teacher_control" in rsvqa_results

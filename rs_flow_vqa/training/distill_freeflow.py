@@ -9,7 +9,11 @@ from rs_flow_vqa.config import Config
 from rs_flow_vqa.utils.reproducibility import set_seed
 from rs_flow_vqa.utils.checkpoint import save_checkpoint, load_checkpoint
 from rs_flow_vqa.data.caching import FeatureCache
-from rs_flow_vqa.models.bridge import TokenTransformer, PrefixLengthClassifier
+from rs_flow_vqa.models.bridge import (
+    BRIDGE_ARCHITECTURE_VERSION,
+    PrefixLengthClassifier,
+    TokenTransformer,
+)
 from rs_flow_vqa.models.freeflow import (
     FreeFlowStudent,
     EMA,
@@ -36,6 +40,8 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
             "llm_backbone": cfg.models.llm_backbone,
             "token_storage": "compact_indices",
             "max_prefix_length": cfg.models.max_prefix_length,
+            "cache_version": "conditioned_v2",
+            "image_feature_normalization": "train_zscore_v1",
         }
     )
     image_features = cache_data["image_features"]  # [N_img, 1024]
@@ -73,11 +79,26 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
 
     if (teacher_ckpt_dir / "model_weights.safetensors").exists():
         print(f"Loading trained teacher from {teacher_ckpt_dir}...")
-        load_checkpoint(
+        _, teacher_manifest, _ = load_checkpoint(
             checkpoint_dir=str(teacher_ckpt_dir),
             models={"teacher": teacher_backbone, "prefix_head": prefix_head},
+            expected_manifest={
+                "dataset_fingerprint": cache_data["manifest"]["dataset_fingerprint"],
+                "model_type": "teacher",
+                "bridge_architecture": BRIDGE_ARCHITECTURE_VERSION,
+            },
             device=str(device),
         )
+        min_gap = float(cfg.distillation.get("min_teacher_condition_gap", 0.0))
+        observed_gap = float(
+            teacher_manifest.get("validation_condition_gap", float("-inf"))
+        )
+        if observed_gap < min_gap:
+            raise RuntimeError(
+                "Refusing to distill a teacher that does not use its image "
+                f"condition: validation condition gap {observed_gap:.2%} is "
+                f"below the configured minimum {min_gap:.2%}."
+            )
     else:
         raise FileNotFoundError(
             f"Trained teacher checkpoint not found at {teacher_ckpt_dir}; "
@@ -147,14 +168,22 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
     output_dir = Path(cfg.output_dir) / "freeflow_checkpoint"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Starting FreeFlow distillation for {total_steps} steps on {device}...")
+    print(
+        f"Starting FreeFlow distillation for {total_steps} "
+        f"optimizer updates on {device}..."
+    )
 
     student.train()
     corrector_backbone.train()
 
     step = 0
-    opt_student.zero_grad()
-    opt_aux.zero_grad()
+    checkpoint_contract = {
+        "dataset_fingerprint": cache_data["manifest"]["dataset_fingerprint"],
+        "vision_backbone": cfg.models.vision_backbone,
+        "llm_backbone": cfg.models.llm_backbone,
+        "model_type": "freeflow_student",
+        "bridge_architecture": BRIDGE_ARCHITECTURE_VERSION,
+    }
     if (output_dir / "model_weights.safetensors").exists():
         step, _, _ = load_checkpoint(
             str(output_dir),
@@ -164,6 +193,7 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
                 "corrector": corrector_backbone,
                 "prefix_head": prefix_head,
             },
+            expected_manifest=checkpoint_contract,
             optimizers={"opt_student": opt_student, "opt_aux": opt_aux},
             scalers={"scaler": scaler},
             device=str(device),
@@ -171,64 +201,72 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
         print(f"Resuming FreeFlow distillation from step {step}")
 
     while step < total_steps:
-        positions = torch.randint(0, train_image_indices.numel(), (batch_size,))
-        img_idx = train_image_indices[positions]
-        c = image_features[img_idx].to(device)  # [B, 1024]
-
-        # Target-free condition sampling: predict mask M using prefix_head
-        with torch.no_grad():
-            predicted_mask = prefix_head.predict_mask(c)  # [B, 32]
-
-        step_ratio = step / float(max(1, total_steps))
-
-        pred_count = max(1, int(round(batch_size * cfg.distillation.pred_prob)))
-        pred_count = min(pred_count, batch_size - 1)
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-            pred_loss, metrics = compute_prediction_loss(
-                student=student,
-                teacher=teacher_backbone,
-                c=c[:pred_count],
-                mask=predicted_mask[:pred_count],
-                n_intervals=cfg.distillation.n_intervals,
-                k_norm_exp=cfg.distillation.k_norm_exp,
+        opt_student.zero_grad()
+        opt_aux.zero_grad()
+        for _ in range(grad_accum_steps):
+            positions = torch.randint(
+                0, train_image_indices.numel(), (batch_size,)
             )
-            aux_loss, corr_student_loss, metrics = compute_correction_losses(
-                student=student,
-                teacher=teacher_backbone,
-                corrector=corrector_backbone,
-                c=c[pred_count:],
-                mask=predicted_mask[pred_count:],
-                step_ratio=step_ratio,
-                alpha_corr=cfg.distillation.alpha_corr,
-                delay_ratio=cfg.distillation.corr_delay_ratio,
-                warmup_ratio=cfg.distillation.corr_warmup_ratio,
+            img_idx = train_image_indices[positions]
+            c = image_features[img_idx].to(device)
+
+            with torch.no_grad():
+                predicted_mask = prefix_head.predict_mask(c)
+
+            step_ratio = step / float(max(1, total_steps))
+            pred_count = max(
+                1, int(round(batch_size * cfg.distillation.pred_prob))
             )
-            student_loss = (pred_loss + corr_student_loss) / grad_accum_steps
-            auxiliary_loss = aux_loss / grad_accum_steps
+            pred_count = min(pred_count, batch_size - 1)
+            with torch.autocast(
+                device_type=device.type, dtype=torch.float16, enabled=use_amp
+            ):
+                pred_loss, pred_metrics = compute_prediction_loss(
+                    student=student,
+                    teacher=teacher_backbone,
+                    c=c[:pred_count],
+                    mask=predicted_mask[:pred_count],
+                    n_intervals=cfg.distillation.n_intervals,
+                    k_norm_exp=cfg.distillation.k_norm_exp,
+                )
+                aux_loss, corr_student_loss, corr_metrics = (
+                    compute_correction_losses(
+                        student=student,
+                        teacher=teacher_backbone,
+                        corrector=corrector_backbone,
+                        c=c[pred_count:],
+                        mask=predicted_mask[pred_count:],
+                        step_ratio=step_ratio,
+                        alpha_corr=cfg.distillation.alpha_corr,
+                        delay_ratio=cfg.distillation.corr_delay_ratio,
+                        warmup_ratio=cfg.distillation.corr_warmup_ratio,
+                    )
+                )
+                student_loss = (
+                    pred_loss + corr_student_loss
+                ) / grad_accum_steps
+                auxiliary_loss = aux_loss / grad_accum_steps
 
-        scaler.scale(auxiliary_loss).backward()
-        scaler.scale(student_loss).backward()
+            scaler.scale(auxiliary_loss).backward()
+            scaler.scale(student_loss).backward()
 
-        if (step + 1) % grad_accum_steps == 0 or (step + 1) == total_steps:
-            scaler.unscale_(opt_student)
-            scaler.unscale_(opt_aux)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(corrector_backbone.parameters(), 1.0)
-            scaler.step(opt_aux)
-            scaler.step(opt_student)
-            scaler.update()
-            opt_aux.zero_grad()
-            opt_student.zero_grad()
-            student_ema.update()
-
+        scaler.unscale_(opt_student)
+        scaler.unscale_(opt_aux)
+        torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(corrector_backbone.parameters(), 1.0)
+        scaler.step(opt_aux)
+        scaler.step(opt_student)
+        scaler.update()
+        student_ema.update()
         step += 1
 
         if step % max(1, total_steps // 10) == 0 or step == total_steps:
             print(
-                f"[FreeFlow Step {step}/{total_steps}] "
-                f"Pred Loss: {pred_loss.item():.4f} | "
+                f"[FreeFlow Update {step}/{total_steps}] "
+                f"Pred Residual MSE: "
+                f"{pred_metrics['pred_residual_mse']:.4f} | "
                 f"Aux Loss: {aux_loss.item():.4f} | "
-                f"Lambda: {metrics.get('adaptive_lambda', 0.0):.4f}"
+                f"Lambda: {corr_metrics.get('adaptive_lambda', 0.0):.4f}"
             )
 
         if step % 1000 == 0:
@@ -240,23 +278,13 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
                     "corrector": corrector_backbone,
                     "prefix_head": prefix_head,
                 },
-                {
-                    "dataset_fingerprint": cache_data["manifest"]["dataset_fingerprint"],
-                    "vision_backbone": cfg.models.vision_backbone,
-                    "llm_backbone": cfg.models.llm_backbone,
-                    "model_type": "freeflow_student",
-                },
+                checkpoint_contract,
                 step,
                 optimizers={"opt_student": opt_student, "opt_aux": opt_aux},
                 scalers={"scaler": scaler},
             )
 
-    manifest = {
-        "dataset_fingerprint": cache_data["manifest"].get("dataset_fingerprint", "rsicd_v1"),
-        "vision_backbone": cfg.models.vision_backbone,
-        "llm_backbone": cfg.models.llm_backbone,
-        "model_type": "freeflow_student",
-    }
+    manifest = checkpoint_contract
 
     save_checkpoint(
         checkpoint_dir=str(output_dir),

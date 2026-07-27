@@ -9,7 +9,11 @@ from rs_flow_vqa.utils.reproducibility import set_seed
 from rs_flow_vqa.utils.checkpoint import load_checkpoint
 from rs_flow_vqa.data.rsvqa import RSVQADataset
 from rs_flow_vqa.models.backbones import ScaleMAEEncoder
-from rs_flow_vqa.models.bridge import TokenTransformer, PrefixLengthClassifier
+from rs_flow_vqa.models.bridge import (
+    BRIDGE_ARCHITECTURE_VERSION,
+    PrefixLengthClassifier,
+    TokenTransformer,
+)
 from rs_flow_vqa.models.flow_matching import sample_heun
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
@@ -30,6 +34,29 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
         split="val" if cfg.is_smoke else "test",
         is_smoke=cfg.is_smoke,
     )
+    subset_fraction = float(cfg.evaluation.get("rsvqa_subset_fraction", 1.0))
+    if not 0.0 < subset_fraction <= 1.0:
+        raise ValueError("evaluation.rsvqa_subset_fraction must be in (0, 1]")
+    if subset_fraction < 1.0:
+        subset_size = max(1, round(len(rsvqa_ds) * subset_fraction))
+        generator = torch.Generator().manual_seed(cfg.seed)
+        selected = torch.randperm(len(rsvqa_ds), generator=generator)[
+            :subset_size
+        ].tolist()
+        rsvqa_ds.samples = [rsvqa_ds.samples[i] for i in selected]
+
+    cache = FeatureCache(cfg.cache_dir)
+    cache_data = cache.load_cache(
+        {
+            "vision_backbone": cfg.models.vision_backbone,
+            "llm_backbone": cfg.models.llm_backbone,
+            "token_storage": "compact_indices",
+            "cache_version": "conditioned_v2",
+            "image_feature_normalization": "train_zscore_v1",
+        }
+    )
+    normalizer = cache_data["whitening_normalizer"].to(device)
+    image_normalizer = cache_data["image_normalizer"].to(device)
 
     # 1. Backbones
     vision_encoder = ScaleMAEEncoder(
@@ -79,22 +106,30 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
         raise FileNotFoundError(f"Teacher checkpoint missing at {teacher_ckpt}")
     if not (student_ckpt / "model_weights.safetensors").exists():
         raise FileNotFoundError(f"Student checkpoint missing at {student_ckpt}")
-    load_checkpoint(str(teacher_ckpt), {"teacher": teacher, "prefix_head": prefix_head}, device=str(device))
-    load_checkpoint(str(student_ckpt), {"student_ema": student_backbone}, device=str(device))
+    common_manifest = {
+        "dataset_fingerprint": cache_data["manifest"]["dataset_fingerprint"],
+        "bridge_architecture": BRIDGE_ARCHITECTURE_VERSION,
+    }
+    load_checkpoint(
+        str(teacher_ckpt),
+        {"teacher": teacher, "prefix_head": prefix_head},
+        expected_manifest={**common_manifest, "model_type": "teacher"},
+        device=str(device),
+    )
+    load_checkpoint(
+        str(student_ckpt),
+        {"student_ema": student_backbone},
+        expected_manifest={
+            **common_manifest,
+            "model_type": "freeflow_student",
+        },
+        device=str(device),
+    )
 
     teacher.eval()
     student_backbone.eval()
     prefix_head.eval()
     student = FreeFlowStudent(student_backbone).to(device)
-
-    cache = FeatureCache(cfg.cache_dir)
-    normalizer = cache.load_cache(
-        {
-            "vision_backbone": cfg.models.vision_backbone,
-            "llm_backbone": cfg.models.llm_backbone,
-            "token_storage": "compact_indices",
-        }
-    )["whitening_normalizer"].to(device)
 
     # Cache image features & soft prefixes for each unique image
     unique_images = rsvqa_ds.get_unique_image_paths()
@@ -105,7 +140,9 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
     for img_id, img_path, gsd in unique_images:
         image = load_rgb_image(img_path).unsqueeze(0).to(device)
         with torch.no_grad():
-            c = vision_encoder(image, gsd=gsd)  # [1, 1024]
+            c = image_normalizer.normalize(
+                vision_encoder(image, gsd=gsd)
+            )
             mask = prefix_head.predict_mask(c)  # [1, 32]
 
             # Generate 16-NFE teacher prefix and 1-step student prefix
@@ -125,6 +162,12 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
     text_only_preds = []
     teacher_preds = []
     student_preds = []
+    shuffled_teacher_preds = []
+    image_ids = list(image_prefixes)
+    shuffled_image_id = {
+        image_id: image_ids[(i + 1) % len(image_ids)]
+        for i, image_id in enumerate(image_ids)
+    }
 
     print(f"Evaluating {len(rsvqa_ds)} QA triplets...")
 
@@ -160,19 +203,43 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> Dict[str, Any]:
         )[0]
         student_preds.append({"predicted": s_ans, "ground_truth": gt_ans, "type": q_type})
 
+        # Negative control: a prefix from the wrong image should not perform
+        # like the matched prefix if the bridge uses visual conditioning.
+        wrong_t_prefix, _, wrong_mask = image_prefixes[
+            shuffled_image_id[img_id]
+        ]
+        wrong_answer = llm_wrapper.generate_answer(
+            prefix_embeddings=wrong_t_prefix,
+            questions=[q_text],
+            prefix_mask=wrong_mask,
+        )[0]
+        shuffled_teacher_preds.append(
+            {
+                "predicted": wrong_answer,
+                "ground_truth": gt_ans,
+                "type": q_type,
+            }
+        )
+
     text_acc = compute_vqa_accuracy(text_only_preds)
     teacher_acc = compute_vqa_accuracy(teacher_preds)
     student_acc = compute_vqa_accuracy(student_preds)
+    shuffled_teacher_acc = compute_vqa_accuracy(shuffled_teacher_preds)
 
     results = {
         "text_only_baseline": text_acc,
         "teacher_16nfe": teacher_acc,
         "student_1step": student_acc,
+        "shuffled_image_teacher_control": shuffled_teacher_acc,
     }
 
     print("\n=== RSVQA Zero-Shot Transfer Results ===")
     print(f"Text-Only Baseline Overall: {text_acc['overall']*100:.2f}%")
     print(f"Teacher (16-NFE) Overall:   {teacher_acc['overall']*100:.2f}%")
     print(f"Student (1-Step) Overall:   {student_acc['overall']*100:.2f}%")
+    print(
+        "Wrong-Image Teacher Control: "
+        f"{shuffled_teacher_acc['overall']*100:.2f}%"
+    )
 
     return results

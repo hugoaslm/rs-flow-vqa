@@ -37,6 +37,7 @@ class FeatureCache:
         unique_token_ids: torch.Tensor,  # [U]
         unique_token_embeds: torch.Tensor,  # [U, 2048]
         whitening_normalizer: WhiteningNormalizer,
+        image_normalizer: WhiteningNormalizer,
         manifest_meta: Dict[str, Any],
     ) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,12 @@ class FeatureCache:
 
         # 3. Save whitening stats
         save_safetensors(
-            whitening_normalizer.state_dict(),
+            {
+                "mean": whitening_normalizer.mean.contiguous(),
+                "std": whitening_normalizer.std.contiguous(),
+                "image_mean": image_normalizer.mean.contiguous(),
+                "image_std": image_normalizer.std.contiguous(),
+            },
             str(self.whitening_path)
         )
 
@@ -107,6 +113,11 @@ class FeatureCache:
         features_dict = load_safetensors(str(self.features_path))
         table_dict = load_safetensors(str(self.table_path))
         whitening_dict = load_safetensors(str(self.whitening_path))
+        if "image_mean" not in whitening_dict or "image_std" not in whitening_dict:
+            raise ValueError(
+                "Feature cache predates train-split image normalization. "
+                "Delete/recreate the cache with `cache-features`."
+            )
 
         with open(self.captions_path, "r", encoding="utf-8") as f:
             captions_payload = json.load(f)
@@ -120,6 +131,9 @@ class FeatureCache:
         }
 
         normalizer = WhiteningNormalizer.from_state_dict(whitening_dict)
+        image_normalizer = WhiteningNormalizer(
+            whitening_dict["image_mean"], whitening_dict["image_std"]
+        )
 
         return {
             "manifest": manifest,
@@ -132,4 +146,5 @@ class FeatureCache:
             "caption_to_image_idx": torch.tensor(captions_payload["caption_to_image_idx"], dtype=torch.long),
             "image_metadata": captions_payload["image_metadata"],
             "whitening_normalizer": normalizer,
+            "image_normalizer": image_normalizer,
         }

@@ -4,6 +4,6 @@ __pycache__/
 .venv/
 *.egg-info/
 outputs/
-data/cache/
-data/smoke_cache/
+data/cache*/
+data/smoke_cache*/
 .ipynb_checkpoints/

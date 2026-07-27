@@ -128,6 +128,7 @@ def compute_prediction_loss(
 
     metrics = {
         "pred_loss": float(loss.item()),
+        "pred_residual_mse": float(normalized_sq_norm.mean().item()),
     }
     return loss, metrics
 

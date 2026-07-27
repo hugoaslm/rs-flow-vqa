@@ -41,6 +41,12 @@ class RSICDDataset(Dataset):
 
         self.samples: List[Dict[str, Any]] = []
         raw_images = raw_data.get("images", [])
+        if not is_smoke and len(raw_images) < 10_000:
+            raise ValueError(
+                f"RSICD at {json_path} contains only {len(raw_images)} images. "
+                "A real run requires the official RSICD release (10,921 images); "
+                "the small files shipped with this repository are smoke fixtures."
+            )
 
         for img in raw_images:
             img_split = img.get("split", "train")

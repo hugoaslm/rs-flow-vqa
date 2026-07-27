@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+BRIDGE_ARCHITECTURE_VERSION = "conditioned_v2"
+
 
 class TimeEmbedding(nn.Module):
     """Sinusoidal + MLP embedding for scalar time/duration t in [0, 1]."""
@@ -48,6 +50,7 @@ class PrefixLengthClassifier(nn.Module):
         super().__init__()
         self.image_dim = image_dim
         self.max_prefix_length = max_prefix_length
+        self.feature_norm = nn.LayerNorm(image_dim)
         self.net = nn.Sequential(
             nn.Linear(image_dim, hidden_dim),
             nn.SiLU(),
@@ -63,7 +66,7 @@ class PrefixLengthClassifier(nn.Module):
         Returns:
             Logits of shape [B, max_prefix_length]
         """
-        return self.net(c)
+        return self.net(self.feature_norm(c))
 
     def predict_mask(self, c: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         """Predict binary mask M in {0, 1}^32 for distillation/inference.
@@ -152,6 +155,7 @@ class TokenTransformer(nn.Module):
         self.output_proj = nn.Linear(hidden_dim, token_dim)
 
         # Condition projection: 1024 -> 4 conditioning tokens (4 * 256 = 1024)
+        self.condition_norm = nn.LayerNorm(image_dim)
         self.cond_proj = nn.Sequential(
             nn.Linear(image_dim, hidden_dim * num_cond_tokens),
             nn.SiLU(),
@@ -176,6 +180,21 @@ class TokenTransformer(nn.Module):
             for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(hidden_dim)
+
+    def encode_condition(self, c: torch.Tensor) -> torch.Tensor:
+        """Return condition tokens after feature normalization and projection."""
+        cond_flat = self.cond_proj(self.condition_norm(c))
+        return cond_flat.view(
+            c.shape[0], self.num_cond_tokens, self.hidden_dim
+        )
+
+    def encode_target_summary(
+        self, y: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Pool target tokens in the bridge hidden space for alignment."""
+        hidden = self.input_proj(y)
+        weights = mask.unsqueeze(-1).to(hidden.dtype)
+        return (hidden * weights).sum(1) / weights.sum(1).clamp_min(1.0)
 
     def forward(
         self,
@@ -205,8 +224,7 @@ class TokenTransformer(nn.Module):
         h_x = self.input_proj(x) + self.pos_emb  # [B, 32, 256]
 
         # 2. Embed image condition into prefix condition tokens
-        cond_flat = self.cond_proj(c)  # [B, 4 * 256]
-        cond_tokens = cond_flat.view(B, self.num_cond_tokens, self.hidden_dim)  # [B, 4, 256]
+        cond_tokens = self.encode_condition(c)  # [B, 4, 256]
 
         # 3. Embed time t and add to tokens
         t_emb = self.time_emb(t).unsqueeze(1)  # [B, 1, 256]

@@ -75,6 +75,18 @@ class RSVQADataset(Dataset):
                 question.setdefault("image_filename", image_by_id.get(image_id))
                 question.setdefault("split", split)
 
+        if not is_smoke:
+            unique_image_ids = {
+                q.get("img_id", q.get("image_id", 0)) for q in questions
+            }
+            if len(questions) < 1_000 or len(unique_image_ids) < 100:
+                raise ValueError(
+                    f"RSVQA-LR at {self.data_dir} contains only "
+                    f"{len(unique_image_ids)} images and {len(questions)} questions. "
+                    "A real run requires an official RSVQA-LR split; the small "
+                    "files shipped with this repository are smoke fixtures."
+                )
+
         self.samples: List[Dict[str, Any]] = []
         for q in questions:
             q_split = q.get("split", "val")

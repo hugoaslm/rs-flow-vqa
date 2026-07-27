@@ -4,8 +4,8 @@ experiment_name: "t4_rs_flow_vqa"
 seed: 42
 device: "cuda"
 precision: "fp16"
-output_dir: "./outputs/t4_run"
-cache_dir: "./data/cache"
+output_dir: "./outputs/t4_conditioned_v2"
+cache_dir: "./data/cache_conditioned_v2"
 
 models:
   vision_backbone: "scale_mae_vit_l"
@@ -26,18 +26,21 @@ bridge:
 teacher:
   batch_size: 16
   grad_accum_steps: 4
-  total_steps: 20000
+  total_steps: 8000  # optimizer updates; each uses grad_accum_steps microbatches
   lr: 0.0002
   warmup_steps: 1000
   weight_decay: 0.01
   grad_clip: 1.0
   coupling: "ot"  # "ot" or "independent"
+  high_noise_probability: 0.5
+  high_noise_beta_alpha: 3.0
+  condition_alignment_weight: 0.1
   evaluation_nfes: [16, 32]
 
 distillation:
   batch_size: 16
   grad_accum_steps: 4
-  total_steps: 15000
+  total_steps: 5000  # optimizer updates
   student_lr: 0.00003
   auxiliary_lr: 0.0001
   adam_betas: [0.9, 0.99]
@@ -48,6 +51,7 @@ distillation:
   corr_delay_ratio: 0.10
   corr_warmup_ratio: 0.10
   pred_prob: 0.75
+  min_teacher_condition_gap: 0.01
 
 data:
   rsicd_data_dir: "./data/RSICD"
@@ -55,5 +59,5 @@ data:
   captions_per_image: 5
 
 evaluation:
-  rsvqa_subset_fraction: 0.10
+  rsvqa_subset_fraction: 1.0
   eval_seeds: [42, 100, 2024]

@@ -52,6 +52,9 @@ def compute_cfm_loss(
     c: torch.Tensor,  # Image condition [B, 1024]
     mask: torch.Tensor,  # Binary mask [B, 32]
     coupling: str = "ot",  # "ot" or "independent"
+    high_noise_probability: float = 0.0,
+    high_noise_beta_alpha: float = 3.0,
+    diagnose_condition: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Compute Conditional Flow Matching loss.
 
@@ -73,8 +76,15 @@ def compute_cfm_loss(
     elif coupling != "independent":
         raise ValueError(f"Unknown coupling {coupling!r}; expected 'ot' or 'independent'")
 
-    # Sample random time t in [0, 1]
-    t = torch.rand(B, device=device)  # [B]
+    # Mix uniform times with Beta(alpha, 1) times biased toward the noise
+    # endpoint. Near t=1 the state itself reveals little about y, so the
+    # velocity field must learn to use the image condition.
+    uniform_t = torch.rand(B, device=device)
+    biased_t = torch.rand(B, device=device).pow(
+        1.0 / max(1.0, high_noise_beta_alpha)
+    )
+    use_biased = torch.rand(B, device=device) < high_noise_probability
+    t = torch.where(use_biased, biased_t, uniform_t)
     t_expand = t.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
 
     # Interpolate continuous state x_t
@@ -94,9 +104,54 @@ def compute_cfm_loss(
 
     metrics = {
         "cfm_loss": float(loss.item()),
+        "mean_t": float(t.mean().item()),
     }
+    if diagnose_condition and B > 1:
+        with torch.no_grad():
+            shuffled_pred = teacher(
+                x_t, t, c.roll(1, dims=0), mask=mask
+            )
+            shuffled_loss = (
+                (shuffled_pred - u_t).pow(2) * mask_expand
+            ).sum() / valid_elements
+            output_shift = (
+                (shuffled_pred - v_pred.detach()).pow(2) * mask_expand
+            ).sum() / valid_elements
+        metrics.update(
+            {
+                "shuffled_cfm_loss": float(shuffled_loss.item()),
+                "relative_condition_gap": float(
+                    ((shuffled_loss - loss.detach()) / loss.detach().clamp_min(1e-6)).item()
+                ),
+                "condition_output_shift": float(output_shift.item()),
+            }
+        )
 
     return loss, metrics
+
+
+def compute_condition_alignment_loss(
+    teacher: nn.Module,
+    y: torch.Tensor,
+    c: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Align image-condition tokens with the paired caption in hidden space.
+
+    The caption branch is stop-gradient: this regularizer teaches the
+    condition projection to carry caption-relevant information without
+    allowing the flow input projection to collapse to satisfy the auxiliary
+    objective.
+    """
+    condition_summary = teacher.encode_condition(c).mean(1)
+    with torch.no_grad():
+        target_summary = teacher.encode_target_summary(y, mask)
+    return (
+        1.0
+        - torch.nn.functional.cosine_similarity(
+            condition_summary.float(), target_summary.float(), dim=-1
+        )
+    ).mean()
 
 
 @torch.no_grad()
