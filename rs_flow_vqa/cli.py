@@ -1,6 +1,7 @@
 """Command Line Interface for RS-Flow-VQA."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import sys
 from pathlib import Path
@@ -12,8 +13,13 @@ from rs_flow_vqa.data.caching import FeatureCache
 from rs_flow_vqa.data.whitening import WhiteningNormalizer
 from rs_flow_vqa.data.rsicd import RSICDDataset
 from rs_flow_vqa.training.train_teacher import train_teacher_pipeline
+from rs_flow_vqa.training.train_alignment import (
+    train_prompt_autoencoder_pipeline,
+    train_visual_alignment_pipeline,
+)
 from rs_flow_vqa.training.distill_freeflow import distill_freeflow_pipeline
 from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
+from rs_flow_vqa.evaluation.eval_caption import _load_alignment
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
 from rs_flow_vqa.models.backbones import ScaleMAEEncoder, QwenEmbeddingWrapper, load_rgb_image
 from rs_flow_vqa.models.bridge import (
@@ -23,6 +29,8 @@ from rs_flow_vqa.models.bridge import (
 )
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
+from rs_flow_vqa.models.latent_flow import LATENT_FLOW_ARCHITECTURE_VERSION
+from rs_flow_vqa.training.train_teacher import build_latent_flow
 from rs_flow_vqa.utils.checkpoint import load_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
 import torch
@@ -43,7 +51,7 @@ def prepare_rsicd_cmd(args: argparse.Namespace) -> None:
 
 
 def cache_features_cmd(args: argparse.Namespace) -> None:
-    """Subcommand: cache-features"""
+    """Cache v3 Scale-MAE spatial tokens and raw Qwen caption IDs."""
     cfg = load_config(
         config_path=args.config,
         smoke=args.smoke,
@@ -51,7 +59,7 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
         seed_override=args.seed,
         output_dir_override=args.output_dir,
     )
-    print(f"Caching Scale-MAE features and Qwen token lookup table to: {cfg.cache_dir}")
+    print(f"Caching Scale-MAE spatial tokens and Qwen caption IDs to: {cfg.cache_dir}")
 
     set_seed(cfg.seed)
     is_smoke = bool(cfg.get("is_smoke", False))
@@ -61,12 +69,29 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
     ds = RSICDDataset(
         data_dir=cfg.data.rsicd_data_dir,
         split="all",
-        max_prefix_length=cfg.models.max_prefix_length,
+        max_prefix_length=cfg.models.max_caption_length,
         tokenizer=None,
         is_smoke=is_smoke,
     )
 
     cache = FeatureCache(cfg.cache_dir)
+    if cache.exists_v3():
+        try:
+            cache.load_spatial_cache(
+                {
+                    "cache_version": "aligned_v3",
+                    "vision_backbone": cfg.models.vision_backbone,
+                    "llm_backbone": cfg.models.llm_backbone,
+                    "max_caption_length": cfg.models.max_caption_length,
+                }
+            )
+            print("Compatible v3 cache already exists; skipping feature extraction.")
+            return
+        except ValueError:
+            raise RuntimeError(
+                f"An incompatible cache already exists at {cfg.cache_dir}. "
+                "Use the versioned directory from the active config or move it aside."
+            )
 
     if not ds.samples:
         raise RuntimeError("RSICD contains no caption samples")
@@ -94,134 +119,103 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
 
     if is_smoke:
         generator = torch.Generator().manual_seed(cfg.seed)
-        image_features = torch.randn(len(image_meta), cfg.models.vision_dim, generator=generator)
+        spatial_features = torch.randn(
+            len(image_meta),
+            cfg.models.spatial_tokens,
+            cfg.models.vision_dim,
+            generator=generator,
+        )
         raw_sequences = [
-            torch.randint(0, 2048, (min(8 + i % 8, cfg.models.max_prefix_length),), generator=generator).tolist()
+            torch.randint(
+                1,
+                2048,
+                (min(4 + i % 8, cfg.models.max_caption_length),),
+                generator=generator,
+            ).tolist()
             for i in range(len(captions))
         ]
-        unique_ids = torch.arange(2048, dtype=torch.long)
-        unique_embeds = torch.randn(2048, cfg.models.llm_dim, generator=generator)
     else:
         vision = ScaleMAEEncoder(
             cfg.models.vision_backbone, device=str(device), smoke=False
         ).to(device)
         feature_batches = []
-        vision_batch_size = 8
-        for start in range(0, len(image_meta), vision_batch_size):
-            records = image_meta[start : start + vision_batch_size]
-            images = torch.stack([load_rgb_image(record["path"]) for record in records]).to(device)
-            # RSICD lacks reliable per-image GSD, so the configured fixed value
-            # is used consistently and recorded in the manifest.
-            feature_batches.append(
-                vision(images, gsd=float(cfg.models.fixed_gsd)).cpu()
-            )
-        image_features = torch.cat(feature_batches)
+        vision_batch_size = int(cfg.alignment.cache_batch_size)
+        workers = int(cfg.alignment.cache_num_workers)
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            for start in range(0, len(image_meta), vision_batch_size):
+                records = image_meta[start : start + vision_batch_size]
+                paths = [record["path"] for record in records]
+                if workers > 0:
+                    loaded = list(executor.map(load_rgb_image, paths))
+                else:
+                    loaded = [load_rgb_image(path) for path in paths]
+                images = torch.stack(loaded)
+                if device.type == "cuda":
+                    images = images.pin_memory()
+                images = images.to(device, non_blocking=device.type == "cuda")
+                # RSICD lacks reliable per-image GSD, so the configured fixed
+                # value is used consistently and recorded in the manifest.
+                feature_batches.append(
+                    vision.forward_spatial(
+                        images, gsd=float(cfg.models.fixed_gsd)
+                    ).half().cpu()
+                )
+                if (start // vision_batch_size + 1) % 100 == 0:
+                    print(
+                        f"Cached {min(start + vision_batch_size, len(image_meta)):,}/"
+                        f"{len(image_meta):,} images"
+                    )
+        spatial_features = torch.cat(feature_batches)
         del vision
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        qwen = QwenEmbeddingWrapper(
-            cfg.models.llm_backbone, device=str(device), smoke=False
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.models.llm_backbone, use_fast=True
         )
         raw_sequences = [
-            qwen.tokenizer.encode(text, add_special_tokens=False)[
-                : cfg.models.max_prefix_length
+            tokenizer.encode(text, add_special_tokens=False)[
+                : cfg.models.max_caption_length
             ]
             for text in captions
         ]
-        unique_ids = torch.tensor(
-            sorted({token for sequence in raw_sequences for token in sequence}),
-            dtype=torch.long,
-        )
-        unique_embeds = qwen.lookup_tokens(unique_ids.to(device)).cpu()
-        del qwen
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
-    # Store compact table indices, never raw Qwen IDs, in caption rows.
-    id_to_compact = {int(token): i for i, token in enumerate(unique_ids.tolist())}
     caption_token_ids = torch.zeros(
-        len(raw_sequences), cfg.models.max_prefix_length, dtype=torch.long
+        len(raw_sequences), cfg.models.max_caption_length, dtype=torch.long
     )
     caption_lengths = torch.zeros(len(raw_sequences), dtype=torch.long)
-    masks = torch.zeros_like(caption_token_ids, dtype=torch.float32)
     for row, sequence in enumerate(raw_sequences):
-        length = min(len(sequence), cfg.models.max_prefix_length)
+        length = min(len(sequence), cfg.models.max_caption_length)
         caption_lengths[row] = length
         if length:
-            caption_token_ids[row, :length] = torch.tensor(
-                [id_to_compact[int(token)] for token in sequence[:length]]
-            )
-            masks[row, :length] = 1
+            caption_token_ids[row, :length] = torch.tensor(sequence[:length])
     caption_to_img = torch.tensor(caption_to_img_list, dtype=torch.long)
-
-    # Standardize image conditions using training images only. This prevents
-    # the condition MLP from having to absorb backbone-specific scales and
-    # avoids validation/test leakage.
-    train_image_indices = torch.tensor(
-        [i for i, item in enumerate(image_meta) if item["split"] == "train"],
-        dtype=torch.long,
-    )
-    if train_image_indices.numel() < 2:
-        raise RuntimeError("RSICD cache needs at least two training images")
-    train_features = image_features[train_image_indices].float()
-    image_normalizer = WhiteningNormalizer(
-        train_features.mean(0),
-        train_features.std(0, unbiased=False).clamp_min(1e-4),
-    )
-    image_features = image_normalizer.normalize(image_features.float())
-
-    # Streaming target whitening uses training captions only and avoids
-    # materializing all [caption, token, 2048] embeddings.
-    train_caption_mask = torch.tensor(
-        [image_meta[index]["split"] == "train" for index in caption_to_img_list],
-        dtype=torch.bool,
-    )
-    count = torch.tensor(0.0, dtype=torch.float64)
-    value_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
-    square_sum = torch.zeros(cfg.models.llm_dim, dtype=torch.float64)
-    for start in range(0, len(raw_sequences), 512):
-        ids = caption_token_ids[start : start + 512]
-        valid = masks[start : start + 512].bool()
-        valid &= train_caption_mask[start : start + 512, None]
-        values = torch.nn.functional.embedding(ids, unique_embeds.float())[valid].double()
-        count += values.shape[0]
-        value_sum += values.sum(0)
-        square_sum += values.square().sum(0)
-    if count.item() == 0:
-        raise RuntimeError("No valid caption tokens were found")
-    mean = (value_sum / count).float()
-    variance = (square_sum / count - (value_sum / count).square()).clamp_min(1e-12)
-    whitening_norm = WhiteningNormalizer(mean, variance.sqrt().float())
 
     dataset_json = Path(cfg.data.rsicd_data_dir) / "dataset_rsicd.json"
     fingerprint = hashlib.sha256()
     fingerprint.update(dataset_json.read_bytes())
     fingerprint.update(cfg.models.vision_backbone.encode())
     fingerprint.update(cfg.models.llm_backbone.encode())
-    fingerprint.update(b"conditioned_cache_v2")
+    fingerprint.update(b"aligned_cache_v3")
     manifest_meta = {
         "dataset_fingerprint": fingerprint.hexdigest(),
         "vision_backbone": cfg.models.vision_backbone,
         "llm_backbone": cfg.models.llm_backbone,
-        "token_storage": "compact_indices",
-        "max_prefix_length": cfg.models.max_prefix_length,
+        "token_storage": "raw_qwen_ids",
+        "max_caption_length": cfg.models.max_caption_length,
+        "llm_dim": cfg.models.llm_dim,
         "fixed_gsd": float(cfg.models.fixed_gsd),
-        "cache_version": "conditioned_v2",
-        "image_feature_normalization": "train_zscore_v1",
-        "target_feature_normalization": "train_zscore_v1",
+        "cache_version": "aligned_v3",
+        "spatial_pool": "adaptive_4x4",
     }
 
-    cache.save_cache(
-        image_features=image_features,
+    cache.save_spatial_cache(
+        spatial_features=spatial_features,
         image_metadata=image_meta,
         caption_token_ids=caption_token_ids,
         caption_lengths=caption_lengths,
         caption_to_image_idx=caption_to_img,
-        unique_token_ids=unique_ids,
-        unique_token_embeds=unique_embeds,
-        whitening_normalizer=whitening_norm,
-        image_normalizer=image_normalizer,
         manifest_meta=manifest_meta,
     )
 
@@ -238,6 +232,20 @@ def train_teacher_cmd(args: argparse.Namespace) -> None:
         output_dir_override=args.output_dir,
     )
     train_teacher_pipeline(cfg)
+
+
+def train_prompt_autoencoder_cmd(args: argparse.Namespace) -> None:
+    cfg = load_config(
+        args.config, args.smoke, args.device, args.seed, args.output_dir
+    )
+    train_prompt_autoencoder_pipeline(cfg)
+
+
+def train_visual_alignment_cmd(args: argparse.Namespace) -> None:
+    cfg = load_config(
+        args.config, args.smoke, args.device, args.seed, args.output_dir
+    )
+    train_visual_alignment_pipeline(cfg)
 
 
 def distill_freeflow_cmd(args: argparse.Namespace) -> None:
@@ -291,72 +299,56 @@ def answer_cmd(args: argparse.Namespace) -> None:
     print(f"Question: {args.question}")
     print(f"Checkpoint: {args.checkpoint}")
 
+    prompt, visual = _load_alignment(cfg, device)
     vision_encoder = ScaleMAEEncoder(
         cfg.models.vision_backbone, device=str(device), smoke=cfg.is_smoke
     ).to(device)
-    llm_wrapper = QwenSoftPrefixWrapper(
-        device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
-    )
+    image = load_rgb_image(args.image).unsqueeze(0).to(device)
+    with torch.no_grad():
+        spatial = vision_encoder.forward_spatial(
+            image, gsd=float(cfg.models.fixed_gsd)
+        )
+        raw_condition = visual(spatial)
+    del vision_encoder, visual
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    # Load student model
-    student_backbone = TokenTransformer(
-        token_dim=cfg.models.llm_dim,
-        hidden_dim=cfg.bridge.hidden_dim,
-        image_dim=cfg.models.vision_dim,
-        max_prefix_length=cfg.models.max_prefix_length,
-        num_cond_tokens=cfg.bridge.num_cond_tokens,
-        num_layers=cfg.bridge.num_layers,
-        num_heads=cfg.bridge.num_heads,
-        mlp_dim=cfg.bridge.mlp_dim,
-    ).to(device)
-
-    prefix_head = PrefixLengthClassifier(
-        image_dim=cfg.models.vision_dim,
-        max_prefix_length=cfg.models.max_prefix_length,
-        hidden_dim=cfg.bridge.hidden_dim,
-    ).to(device)
-
-    if not (Path(args.checkpoint) / "model_weights.safetensors").exists():
-        raise FileNotFoundError(f"Student checkpoint missing at {args.checkpoint}")
+    cache_data = FeatureCache(cfg.cache_dir).load_visual_conditions_only()
+    mean = cache_data["latent_mean"].to(device)
+    std = cache_data["latent_std"].to(device)
+    condition = (raw_condition - mean) / std
+    student_backbone = build_latent_flow(cfg, dropout=0.0).to(device)
     load_checkpoint(
         args.checkpoint,
-        {"student_ema": student_backbone, "prefix_head": prefix_head},
+        {"student_ema": student_backbone},
         expected_manifest={
-            "bridge_architecture": BRIDGE_ARCHITECTURE_VERSION,
-            "model_type": "freeflow_student",
+            "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "model_type": "latent_freeflow_student",
         },
         device=str(device),
     )
-
-    student = FreeFlowStudent(student_backbone).to(device)
-    student.eval()
-    prefix_head.eval()
-
-    # Extract image condition & generate 1-step soft prefix
-    image = load_rgb_image(args.image).unsqueeze(0).to(device)
+    student = FreeFlowStudent(student_backbone).eval()
+    mask = torch.ones(1, cfg.models.latent_tokens, device=device)
     with torch.no_grad():
-        cache_data = FeatureCache(cfg.cache_dir).load_cache(
-            {
-                "vision_backbone": cfg.models.vision_backbone,
-                "llm_backbone": cfg.models.llm_backbone,
-                "token_storage": "compact_indices",
-                "cache_version": "conditioned_v2",
-                "image_feature_normalization": "train_zscore_v1",
-            }
+        eps = torch.randn(
+            1, cfg.models.latent_tokens, cfg.models.latent_dim, device=device
         )
-        c = cache_data["image_normalizer"].to(device).normalize(
-            vision_encoder(image, gsd=float(cfg.models.fixed_gsd))
+        latent_white = student(
+            eps, torch.ones(1, device=device), condition, mask
         )
-        mask = prefix_head.predict_mask(c)
-        eps = torch.randn(1, cfg.models.max_prefix_length, cfg.models.llm_dim, device=device)
-        soft_prefix_white = student(eps, torch.ones(1, device=device), c, mask=mask)
-        normalizer = cache_data["whitening_normalizer"].to(device)
-        soft_prefix = normalizer.unnormalize(soft_prefix_white, mask=mask)
+        soft_prefix = prompt.decoder(latent_white * std + mean)
+    del student, student_backbone
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    llm_wrapper = QwenSoftPrefixWrapper(
+        device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
+    )
+    prefix_mask = torch.ones(1, cfg.models.prefix_tokens, device=device)
 
     answer = llm_wrapper.generate_answer(
         prefix_embeddings=soft_prefix,
         questions=[args.question],
-        prefix_mask=mask,
+        prefix_mask=prefix_mask,
     )[0]
 
     print(f"\nModel Answer: {answer}")
@@ -379,12 +371,23 @@ def main() -> None:
     add_common_args(p1)
 
     # cache-features
-    p2 = subparsers.add_parser("cache-features", help="Extract and cache vision features & token table")
+    p2 = subparsers.add_parser(
+        "cache-features", help="Cache Scale-MAE spatial tokens and Qwen caption IDs"
+    )
     add_common_args(p2)
 
     # train-teacher
     p3 = subparsers.add_parser("train-teacher", help="Train Conditional Flow Matching Teacher")
     add_common_args(p3)
+
+    p_align_text = subparsers.add_parser(
+        "train-prompt-autoencoder", help="Learn Qwen-compatible compact prompt latents"
+    )
+    add_common_args(p_align_text)
+    p_align_visual = subparsers.add_parser(
+        "train-visual-alignment", help="Align Scale-MAE spatial tokens to prompt latents"
+    )
+    add_common_args(p_align_visual)
 
     # distill-freeflow
     p4 = subparsers.add_parser("distill-freeflow", help="Distill Teacher into 1-Step FreeFlow Student")
@@ -413,6 +416,10 @@ def main() -> None:
         cache_features_cmd(args)
     elif args.subcommand == "train-teacher":
         train_teacher_cmd(args)
+    elif args.subcommand == "train-prompt-autoencoder":
+        train_prompt_autoencoder_cmd(args)
+    elif args.subcommand == "train-visual-alignment":
+        train_visual_alignment_cmd(args)
     elif args.subcommand == "distill-freeflow":
         distill_freeflow_cmd(args)
     elif args.subcommand == "evaluate-caption":

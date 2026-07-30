@@ -20,25 +20,21 @@ def compute_minibatch_ot_coupling(
     if B <= 1:
         return y, c, mask
 
+    # Exact Hungarian OT scales cubically. Matching independent blocks keeps
+    # the straight-path benefit without making T4 training CPU-bound.
+    target_for_noise = torch.arange(B, device=y.device)
+    y_flat = (y * mask.unsqueeze(-1)).reshape(B, -1)
+    eps_flat = (eps * mask.unsqueeze(-1)).reshape(B, -1)
     with torch.no_grad():
-        # Compute cost matrix C_ij = || y_i - eps_j ||_2^2
-        y_flat = (y * mask.unsqueeze(-1)).reshape(B, -1)  # [B, K*D]
-        eps_flat = (eps * mask.unsqueeze(-1)).reshape(B, -1)  # [B, K*D]
-
-        # Cost matrix [B, B]
-        cost = (
-            (y_flat[:, None, :] - eps_flat[None, :, :]).square().sum(-1)
-        ).cpu().numpy()
-
-        row_ind, col_ind = linear_sum_assignment(cost)
-
-    # scipy returns matched (target_row, noise_column) pairs. Build the
-    # target index for every noise column; indexing directly with col_ind is
-    # only correct when the optimal assignment happens to be the identity.
-    target_for_noise = torch.empty(B, dtype=torch.long, device=y.device)
-    target_for_noise[torch.as_tensor(col_ind, device=y.device)] = torch.as_tensor(
-        row_ind, device=y.device
-    )
+        for start in range(0, B, 32):
+            end = min(B, start + 32)
+            cost = torch.cdist(
+                y_flat[start:end].float(), eps_flat[start:end].float()
+            ).square().cpu().numpy()
+            row_ind, col_ind = linear_sum_assignment(cost)
+            target_for_noise[
+                start + torch.as_tensor(col_ind, device=y.device)
+            ] = start + torch.as_tensor(row_ind, device=y.device)
     y_ot = y[target_for_noise]
     c_ot = c[target_for_noise]
     mask_ot = mask[target_for_noise]

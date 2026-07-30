@@ -16,14 +16,16 @@ def measure_bridge_latency(
     Distinguishes bridge generation time from frozen LLM decoding time.
     """
     for _ in range(num_warmup):
-        _ = sample_fn()
+        with torch.no_grad():
+            _ = sample_fn()
         if device == "cuda":
             torch.cuda.synchronize()
 
     times_ms = []
     for _ in range(num_runs):
         start = time.perf_counter()
-        _ = sample_fn()
+        with torch.no_grad():
+            _ = sample_fn()
         if device == "cuda":
             torch.cuda.synchronize()
         end = time.perf_counter()

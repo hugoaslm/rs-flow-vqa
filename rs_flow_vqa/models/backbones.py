@@ -83,6 +83,50 @@ class ScaleMAEEncoder(nn.Module):
             parameter.requires_grad_(False)
 
     @torch.no_grad()
+    def forward_spatial(
+        self, images: torch.Tensor, gsd: Optional[float] = 1.0
+    ) -> torch.Tensor:
+        """Return a compact 4x4 grid of Scale-MAE patch features.
+
+        The cache deliberately retains spatial structure instead of reducing
+        an image to one vector.  The returned shape is always [B, 16, 1024].
+        """
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"Expected BCHW RGB images, got {tuple(images.shape)}")
+        if images.shape[-2:] != (224, 224):
+            images = F.interpolate(images.float(), (224, 224), mode="bilinear")
+        if self.smoke:
+            pooled = F.adaptive_avg_pool2d(images.float() / 255.0, (4, 4))
+            pooled = pooled.flatten(2).transpose(1, 2)
+            # Deterministic zero-copy-style expansion is sufficient for smoke tests.
+            repeats = (self.output_dim + pooled.shape[-1] - 1) // pooled.shape[-1]
+            return pooled.repeat(1, 1, repeats)[..., : self.output_dim]
+
+        x = normalize_scalemae_rgb(images)
+        self.model.res = float(gsd if gsd is not None else 1.0)
+        if not hasattr(self.model, "forward_features"):
+            raise RuntimeError(
+                "Installed TorchGeo Scale-MAE does not expose forward_features; "
+                "torchgeo>=0.6,<0.7 is required for spatial-token caching."
+            )
+        tokens = self.model.forward_features(x)
+        if isinstance(tokens, (tuple, list)):
+            tokens = tokens[0]
+        if tokens.ndim != 3 or tokens.shape[-1] != self.output_dim:
+            raise RuntimeError(
+                "Scale-MAE forward_features returned unexpected shape "
+                f"{tuple(tokens.shape)}; expected [B, 196|197, 1024]."
+            )
+        if tokens.shape[1] == 197:
+            tokens = tokens[:, 1:]
+        if tokens.shape[1] != 196:
+            raise RuntimeError(
+                f"Expected a 14x14 Scale-MAE patch grid, got {tokens.shape[1]} tokens."
+            )
+        grid = tokens.transpose(1, 2).reshape(tokens.shape[0], self.output_dim, 14, 14)
+        return F.adaptive_avg_pool2d(grid, (4, 4)).flatten(2).transpose(1, 2).float()
+
+    @torch.no_grad()
     def forward(
         self, images: torch.Tensor, gsd: Optional[float] = 1.0
     ) -> torch.Tensor:
@@ -118,7 +162,7 @@ class QwenEmbeddingWrapper:
     ) -> None:
         self.model_name = model_name
         self.device = torch.device(device)
-        self.embedding_dim = 2048
+        self.embedding_dim = 1536 if "1.5B" in model_name else 2048
         self.smoke = smoke
 
         if smoke:
@@ -143,7 +187,8 @@ class QwenEmbeddingWrapper:
             self.embedding = self.model.get_input_embeddings()
             if self.embedding.embedding_dim != self.embedding_dim:
                 raise RuntimeError(
-                    f"Expected Qwen width 2048, got {self.embedding.embedding_dim}"
+                    f"Expected Qwen width {self.embedding_dim}, "
+                    f"got {self.embedding.embedding_dim}"
                 )
 
     @torch.no_grad()

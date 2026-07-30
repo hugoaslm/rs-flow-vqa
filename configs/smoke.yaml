@@ -1,27 +1,47 @@
 # Fast Smoke Test Configuration for CPU / Mock GPU validation
 
-experiment_name: "smoke_rs_flow_vqa"
+experiment_name: "smoke_aligned_v3"
 seed: 42
 device: "cpu"
 precision: "fp32"
-output_dir: "./outputs/smoke_conditioned_v2"
-cache_dir: "./data/smoke_cache_conditioned_v2"
+output_dir: "./outputs/smoke_aligned_v3"
+cache_dir: "./data/smoke_cache_aligned_v3"
 
 models:
   vision_backbone: "scale_mae_vit_l"
   vision_dim: 1024
-  llm_backbone: "Qwen/Qwen2.5-3B-Instruct"
-  llm_dim: 2048
-  max_prefix_length: 32
+  llm_backbone: "Qwen/Qwen2.5-1.5B-Instruct"
+  llm_dim: 1536
+  max_caption_length: 16
+  prefix_tokens: 8
+  spatial_tokens: 16
+  latent_tokens: 4
+  latent_dim: 32
   fixed_gsd: 1.0
 
 bridge:
-  hidden_dim: 256
+  hidden_dim: 32
   num_layers: 2
   num_heads: 4
-  mlp_dim: 512
-  num_cond_tokens: 4
+  mlp_dim: 64
   dropout: 0.0
+
+alignment:
+  cache_batch_size: 4
+  cache_num_workers: 0
+  prompt_batch_size: 4
+  prompt_grad_accum_steps: 1
+  prompt_epochs: 1
+  prompt_lr: 0.001
+  prefix_norm_weight: 0.001
+  visual_batch_size: 4
+  visual_epochs: 1
+  visual_lr: 0.001
+  visual_calibration_updates: 0
+  visual_calibration_grad_accum_steps: 1
+  qwen_4bit: false
+  gate_prompt_nll_gain: -1.0
+  gate_visual_nll_gap: -1.0
 
 teacher:
   batch_size: 4
@@ -34,7 +54,9 @@ teacher:
   coupling: "ot"
   high_noise_probability: 0.5
   high_noise_beta_alpha: 3.0
-  condition_alignment_weight: 0.1
+  condition_rank_weight: 0.1
+  condition_rank_probability: 0.25
+  min_condition_gap: -1.0
   evaluation_nfes: [4, 8]
 
 distillation:
@@ -52,6 +74,7 @@ distillation:
   corr_warmup_ratio: 0.10
   pred_prob: 0.75
   min_teacher_condition_gap: -1.0
+  min_student_teacher_cosine: -1.0
 
 data:
   rsicd_data_dir: "./data/RSICD"
@@ -59,5 +82,7 @@ data:
   captions_per_image: 5
 
 evaluation:
+  caption_num_images: 4
+  generation_batch_size: 2
   rsvqa_subset_fraction: 0.10
   eval_seeds: [42]

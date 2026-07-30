@@ -4,6 +4,10 @@ import tempfile
 import pytest
 from rs_flow_vqa.config import load_config
 from rs_flow_vqa.training.train_teacher import train_teacher_pipeline
+from rs_flow_vqa.training.train_alignment import (
+    train_prompt_autoencoder_pipeline,
+    train_visual_alignment_pipeline,
+)
 from rs_flow_vqa.training.distill_freeflow import distill_freeflow_pipeline
 from rs_flow_vqa.evaluation.eval_caption import evaluate_caption_pipeline
 from rs_flow_vqa.evaluation.eval_rsvqa import evaluate_rsvqa_pipeline
@@ -28,30 +32,38 @@ def test_end2end_pipeline_smoke():
             output_dir=tmp_dir,
         )
         cache_features_cmd(args)
-        cached = FeatureCache(cfg.cache_dir).load_cache(
+        cached = FeatureCache(cfg.cache_dir).load_spatial_cache(
             {
-                "cache_version": "conditioned_v2",
-                "image_feature_normalization": "train_zscore_v1",
+                "cache_version": "aligned_v3",
+                "token_storage": "raw_qwen_ids",
             }
         )
-        assert "image_normalizer" in cached
+        assert cached["spatial_features"].shape[1:] == (16, 1024)
 
-        # 2. Train teacher
+        # 2. Learn language-compatible targets and visual conditions
+        train_prompt_autoencoder_pipeline(cfg)
+        train_visual_alignment_pipeline(cfg)
+        aligned = FeatureCache(cfg.cache_dir).load_spatial_cache()
+        assert aligned["caption_latents"].shape[-2:] == (4, 32)
+        assert aligned["visual_latents"].shape[-2:] == (4, 32)
+
+        # 3. Train teacher
         teacher_dir = train_teacher_pipeline(cfg)
         assert (Path(cfg.output_dir) / "teacher_checkpoint" / "manifest.json").is_file()
 
-        # 3. Distill FreeFlow student
+        # 4. Distill FreeFlow student
         freeflow_dir = distill_freeflow_pipeline(cfg)
         assert (Path(cfg.output_dir) / "freeflow_checkpoint" / "manifest.json").is_file()
 
-        # 4. Evaluate caption
+        # 5. Evaluate caption
         cap_results = evaluate_caption_pipeline(cfg)
         assert "teacher_16nfe_mse" in cap_results
         assert "student_1step_mse" in cap_results
-        assert "endpoint_condition_gap" in cap_results
+        assert "direct_visual_rouge_l" in cap_results
 
-        # 5. Evaluate RSVQA
+        # 6. Evaluate RSVQA
         rsvqa_results = evaluate_rsvqa_pipeline(cfg)
         assert "text_only_baseline" in rsvqa_results
         assert "student_1step" in rsvqa_results
+        assert "direct_visual_baseline" in rsvqa_results
         assert "shuffled_image_teacher_control" in rsvqa_results

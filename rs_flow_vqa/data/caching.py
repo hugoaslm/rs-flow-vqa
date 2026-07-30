@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import torch
 from safetensors.torch import save_file as save_safetensors, load_file as load_safetensors
+from safetensors import safe_open
 from rs_flow_vqa.data.whitening import WhiteningNormalizer
 
 
@@ -18,6 +19,8 @@ class FeatureCache:
         self.table_path = self.cache_dir / "token_table.safetensors"
         self.captions_path = self.cache_dir / "captions_metadata.json"
         self.whitening_path = self.cache_dir / "whitening_stats.safetensors"
+        self.spatial_path = self.cache_dir / "spatial_features.safetensors"
+        self.latents_path = self.cache_dir / "aligned_latents.safetensors"
 
     def exists(self) -> bool:
         return (
@@ -26,6 +29,145 @@ class FeatureCache:
             and self.table_path.exists()
             and self.captions_path.exists()
         )
+
+    def exists_v3(self) -> bool:
+        return (
+            self.manifest_path.exists()
+            and self.spatial_path.exists()
+            and self.captions_path.exists()
+        )
+
+    def save_spatial_cache(
+        self,
+        spatial_features: torch.Tensor,
+        image_metadata: List[Dict[str, Any]],
+        caption_token_ids: torch.Tensor,
+        caption_lengths: torch.Tensor,
+        caption_to_image_idx: torch.Tensor,
+        manifest_meta: Dict[str, Any],
+    ) -> None:
+        """Save the v3 cache without materializing raw LLM token embeddings."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        save_safetensors(
+            {"spatial_features": spatial_features.half().contiguous()},
+            str(self.spatial_path),
+        )
+        with open(self.captions_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "caption_token_ids": caption_token_ids.tolist(),
+                    "caption_lengths": caption_lengths.tolist(),
+                    "caption_to_image_idx": caption_to_image_idx.tolist(),
+                    "image_metadata": image_metadata,
+                },
+                f,
+            )
+        manifest = {
+            "num_images": int(spatial_features.shape[0]),
+            "num_captions": int(caption_token_ids.shape[0]),
+            "spatial_tokens": int(spatial_features.shape[1]),
+            "vision_dim": int(spatial_features.shape[2]),
+            **manifest_meta,
+        }
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+    def load_spatial_cache(
+        self, expected_manifest: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if not self.exists_v3():
+            raise FileNotFoundError(f"Aligned v3 cache does not exist at {self.cache_dir}")
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        for key, expected in (expected_manifest or {}).items():
+            if manifest.get(key) != expected:
+                raise ValueError(
+                    f"Cache manifest mismatch for {key!r}: expected "
+                    f"{expected!r}, got {manifest.get(key)!r}"
+                )
+        with open(self.captions_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        tensors = load_safetensors(str(self.spatial_path))
+        result = {
+            "manifest": manifest,
+            "spatial_features": tensors["spatial_features"].float(),
+            "caption_token_ids": torch.tensor(
+                metadata["caption_token_ids"], dtype=torch.long
+            ),
+            "caption_lengths": torch.tensor(
+                metadata["caption_lengths"], dtype=torch.long
+            ),
+            "caption_to_image_idx": torch.tensor(
+                metadata["caption_to_image_idx"], dtype=torch.long
+            ),
+            "image_metadata": metadata["image_metadata"],
+        }
+        if self.latents_path.exists():
+            result.update(load_safetensors(str(self.latents_path)))
+        return result
+
+    def save_aligned_latents(
+        self,
+        caption_latents: torch.Tensor,
+        visual_latents: torch.Tensor,
+        latent_mean: torch.Tensor,
+        latent_std: torch.Tensor,
+    ) -> None:
+        """Attach frozen caption/visual latents to an existing v3 cache."""
+        if not self.exists_v3():
+            raise FileNotFoundError("Create the spatial cache before saving latents")
+        save_safetensors(
+            {
+                "caption_latents": caption_latents.half().contiguous(),
+                "visual_latents": visual_latents.half().contiguous(),
+                "latent_mean": latent_mean.float().contiguous(),
+                "latent_std": latent_std.float().contiguous(),
+            },
+            str(self.latents_path),
+        )
+
+    def save_caption_latents(
+        self,
+        caption_latents: torch.Tensor,
+        latent_mean: torch.Tensor,
+        latent_std: torch.Tensor,
+    ) -> None:
+        save_safetensors(
+            {
+                "caption_latents": caption_latents.half().contiguous(),
+                "latent_mean": latent_mean.float().contiguous(),
+                "latent_std": latent_std.float().contiguous(),
+            },
+            str(self.latents_path),
+        )
+
+    def save_visual_latents(self, visual_latents: torch.Tensor) -> None:
+        if not self.latents_path.exists():
+            raise FileNotFoundError("Caption latents must be cached first")
+        current = load_safetensors(str(self.latents_path))
+        current["visual_latents"] = visual_latents.half().contiguous()
+        save_safetensors(current, str(self.latents_path))
+
+    def load_visual_conditions_only(self) -> Dict[str, Any]:
+        """Load distillation conditions without reading caption target tensors."""
+        if not self.exists_v3() or not self.latents_path.exists():
+            raise FileNotFoundError("The aligned v3 cache is incomplete")
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        with open(self.captions_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        with safe_open(str(self.latents_path), framework="pt", device="cpu") as handle:
+            available = set(handle.keys())
+            required = {"visual_latents", "latent_mean", "latent_std"}
+            if not required.issubset(available):
+                raise ValueError(f"Latent cache lacks {sorted(required - available)}")
+            return {
+                "manifest": manifest,
+                "visual_latents": handle.get_tensor("visual_latents"),
+                "latent_mean": handle.get_tensor("latent_mean"),
+                "latent_std": handle.get_tensor("latent_std"),
+                "image_metadata": metadata["image_metadata"],
+            }
 
     def save_cache(
         self,

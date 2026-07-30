@@ -1,4 +1,4 @@
-"""LLM Soft-Prefix Injection into Qwen2.5-3B-Instruct and Logit Equivalence Verification."""
+"""LLM soft-prefix injection and differentiable frozen-Qwen caption loss."""
 
 from typing import Tuple, Dict, Any, Optional, Union
 import torch
@@ -6,7 +6,7 @@ import torch.nn as nn
 
 
 class QwenSoftPrefixWrapper:
-    """Wrapper for inserting unwhitened continuous soft-prefix embeddings into Qwen2.5-3B-Instruct chat templates."""
+    """Insert continuous soft prefixes into a frozen Qwen causal language model."""
 
     def __init__(
         self,
@@ -17,7 +17,7 @@ class QwenSoftPrefixWrapper:
         smoke: bool = False,
     ) -> None:
         self.device = torch.device(device)
-        self.embedding_dim = 2048
+        self.embedding_dim = 1536 if "1.5B" in model_name else 2048
         self.smoke = smoke
 
         if llm_model is None and not smoke:
@@ -36,6 +36,8 @@ class QwenSoftPrefixWrapper:
                     device_map="auto",
                     quantization_config=BitsAndBytesConfig(
                         load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_use_double_quant=True,
                         bnb_4bit_compute_dtype=torch.float16,
                     ),
                 )
@@ -47,9 +49,99 @@ class QwenSoftPrefixWrapper:
             llm_model.eval()
             for parameter in llm_model.parameters():
                 parameter.requires_grad_(False)
+            llm_model.config.use_cache = False
 
         self.llm_model = llm_model
         self.tokenizer = tokenizer
+
+    def embed_caption_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Look up frozen token embeddings while preserving connector gradients."""
+        if self.llm_model is None:
+            generator = torch.Generator(device=token_ids.device).manual_seed(17)
+            table = torch.randn(
+                2048, self.embedding_dim, generator=generator, device=token_ids.device
+            )
+            return torch.nn.functional.embedding(token_ids.remainder(2048), table)
+        return self.llm_model.get_input_embeddings()(token_ids)
+
+    def caption_teacher_forcing_loss(
+        self,
+        prefix_embeddings: torch.Tensor,
+        captions: list[str],
+    ) -> torch.Tensor:
+        """Caption NLL with labels restricted to assistant caption tokens."""
+        if self.llm_model is None or self.tokenizer is None:
+            # A differentiable, deterministic stand-in for CPU smoke tests.
+            targets = []
+            for caption in captions:
+                seed = sum(caption.encode("utf-8")) % 10007
+                generator = torch.Generator(device=prefix_embeddings.device).manual_seed(seed)
+                targets.append(
+                    torch.randn(
+                        self.embedding_dim,
+                        generator=generator,
+                        device=prefix_embeddings.device,
+                    )
+                )
+            target = torch.stack(targets)
+            return torch.nn.functional.mse_loss(prefix_embeddings.mean(1), target)
+
+        scaffold = (
+            "<|im_start|>system\nYou describe remote-sensing images accurately."
+            "<|im_end|>\n<|im_start|>user\nRemote-sensing image:\n"
+        )
+        suffix = (
+            "\nQuestion: Describe this image in one short sentence."
+            "<|im_end|>\n<|im_start|>assistant\n"
+        )
+        embed = self.llm_model.get_input_embeddings()
+        rows, labels = [], []
+        for index, caption in enumerate(captions):
+            before_ids = self.tokenizer.encode(
+                scaffold, add_special_tokens=False, return_tensors="pt"
+            ).to(prefix_embeddings.device)
+            suffix_ids = self.tokenizer.encode(
+                suffix, add_special_tokens=False, return_tensors="pt"
+            ).to(prefix_embeddings.device)
+            caption_ids = self.tokenizer.encode(
+                caption + "<|im_end|>", add_special_tokens=False, return_tensors="pt"
+            ).to(prefix_embeddings.device)
+            before = embed(before_ids)[0]
+            after = embed(suffix_ids)[0]
+            answer = embed(caption_ids)[0]
+            soft = prefix_embeddings[index].to(before.dtype)
+            row = torch.cat([before, soft, after, answer], dim=0)
+            row_labels = torch.full(
+                (row.shape[0],), -100, dtype=torch.long, device=row.device
+            )
+            start = before.shape[0] + soft.shape[0] + after.shape[0]
+            row_labels[start:] = caption_ids[0]
+            rows.append(row)
+            labels.append(row_labels)
+
+        max_len = max(row.shape[0] for row in rows)
+        inputs = torch.zeros(
+            len(rows), max_len, self.embedding_dim,
+            device=rows[0].device, dtype=rows[0].dtype
+        )
+        attention = torch.zeros(
+            len(rows), max_len, device=rows[0].device, dtype=torch.long
+        )
+        padded_labels = torch.full(
+            (len(rows), max_len), -100, device=rows[0].device, dtype=torch.long
+        )
+        for i, row in enumerate(rows):
+            length = row.shape[0]
+            inputs[i, :length] = row
+            attention[i, :length] = 1
+            padded_labels[i, :length] = labels[i]
+        output = self.llm_model(
+            inputs_embeds=inputs,
+            attention_mask=attention,
+            labels=padded_labels,
+            use_cache=False,
+        )
+        return output.loss
 
     def format_chat_embeddings(
         self,
