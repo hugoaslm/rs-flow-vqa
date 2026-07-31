@@ -26,7 +26,11 @@ from rs_flow_vqa.utils.checkpoint import load_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
 
 
-def _load_alignment(cfg: Config, device: torch.device):
+def _load_alignment(
+    cfg: Config,
+    device: torch.device,
+    visual_alignment_signature: str | None = None,
+):
     prompt = PromptAutoencoder(
         cfg.models.llm_dim,
         cfg.models.latent_dim,
@@ -42,10 +46,16 @@ def _load_alignment(cfg: Config, device: torch.device):
         {"model_type": "prompt_autoencoder", "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION},
         device=str(device),
     )
+    visual_manifest = {
+        "model_type": "visual_alignment",
+        "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
+    }
+    if visual_alignment_signature is not None:
+        visual_manifest["visual_alignment_signature"] = visual_alignment_signature
     load_checkpoint(
         str(Path(cfg.output_dir) / "visual_alignment_checkpoint"),
         {"visual": visual},
-        {"model_type": "visual_alignment", "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION},
+        visual_manifest,
         device=str(device),
     )
     prompt.eval()
@@ -61,19 +71,34 @@ def evaluate_caption_pipeline(cfg: Config) -> dict:
     data = FeatureCache(cfg.cache_dir).load_spatial_cache(
         {"cache_version": "aligned_v3"}
     )
-    prompt, visual = _load_alignment(cfg, device)
+    visual_alignment_signature = data["manifest"].get("visual_alignment_signature")
+    if (
+        not visual_alignment_signature
+        or "visual_latents" not in data
+        or data.get("visual_alignment_signature_mismatch", False)
+    ):
+        raise RuntimeError("Run the current visual-alignment stage before evaluation")
+    prompt, visual = _load_alignment(cfg, device, visual_alignment_signature)
     teacher = build_latent_flow(cfg, dropout=0.0).to(device)
     student_backbone = build_latent_flow(cfg, dropout=0.0).to(device)
     load_checkpoint(
         str(Path(cfg.output_dir) / "teacher_checkpoint"),
         {"teacher": teacher},
-        {"model_type": "latent_flow_teacher", "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION},
+        {
+            "model_type": "latent_flow_teacher",
+            "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": visual_alignment_signature,
+        },
         device=str(device),
     )
     load_checkpoint(
         str(Path(cfg.output_dir) / "freeflow_checkpoint"),
         {"student_ema": student_backbone},
-        {"model_type": "latent_freeflow_student", "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION},
+        {
+            "model_type": "latent_freeflow_student",
+            "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": visual_alignment_signature,
+        },
         device=str(device),
     )
     teacher.eval()

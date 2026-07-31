@@ -15,32 +15,90 @@ from rs_flow_vqa.models.alignment import (
     PromptAutoencoder,
     VisualResampler,
     visual_alignment_loss,
+    visual_grounding_loss,
 )
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 from rs_flow_vqa.utils.checkpoint import load_checkpoint, save_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
 
 
-VISUAL_ALIGNMENT_TRAINING_VERSION = "visual_alignment_v2"
+VISUAL_ALIGNMENT_TRAINING_VERSION = "visual_grounding_v3"
 
 
 def _visual_alignment_signature(cfg: Config) -> str:
     alignment = cfg.alignment
-    calibration_batch_size = int(
-        getattr(alignment, "visual_calibration_batch_size", 1)
-    )
-    return ";".join(
-        [
-            VISUAL_ALIGNMENT_TRAINING_VERSION,
-            f"seed={cfg.seed}",
-            f"batch={int(alignment.visual_batch_size)}",
-            f"epochs={int(alignment.visual_epochs)}",
-            f"lr={float(alignment.visual_lr):.8g}",
-            f"cal_updates={int(alignment.visual_calibration_updates)}",
-            f"cal_batch={calibration_batch_size}",
-            f"cal_accum={int(alignment.visual_calibration_grad_accum_steps)}",
-        ]
-    )
+    fields = [
+        VISUAL_ALIGNMENT_TRAINING_VERSION,
+        f"seed={cfg.seed}",
+        f"batch={int(alignment.visual_batch_size)}",
+        f"epochs={int(alignment.visual_epochs)}",
+        f"lr={float(alignment.visual_lr):.8g}",
+        f"lm_updates={int(alignment.visual_lm_updates)}",
+        f"lm_batch={int(alignment.visual_lm_batch_size)}",
+        f"lm_accum={int(alignment.visual_lm_grad_accum_steps)}",
+        f"lm_lr={float(alignment.visual_lm_lr):.8g}",
+        f"shuffle_margin={float(alignment.visual_shuffle_margin):.8g}",
+        f"shuffle_weight={float(alignment.visual_shuffle_weight):.8g}",
+        f"contrastive_weight={float(alignment.visual_contrastive_weight):.8g}",
+        f"latent_weight={float(alignment.visual_latent_weight):.8g}",
+        f"val_interval={int(alignment.visual_lm_validation_interval)}",
+        f"val_batch={int(alignment.visual_validation_batch_size)}",
+        f"val_images={int(alignment.visual_validation_images)}",
+        f"gate={float(alignment.gate_visual_nll_gap):.8g}",
+    ]
+    return ";".join(fields)
+
+
+def _caption_groups(data: dict, split: str) -> dict[int, list[int]]:
+    groups: dict[int, list[int]] = defaultdict(list)
+    for caption_idx, image_idx in enumerate(data["caption_to_image_idx"].tolist()):
+        if data["image_metadata"][image_idx]["split"] == split:
+            groups[image_idx].append(caption_idx)
+    return groups
+
+
+def _derangement(size: int, device: torch.device | str = "cpu") -> torch.Tensor:
+    if size < 2:
+        raise ValueError("A shuffled-image batch requires at least two images")
+    offset = int(torch.randint(1, size, (1,)).item())
+    return torch.arange(size, device=device).roll(offset)
+
+
+def _sample_unique_caption_indices(
+    groups: dict[int, list[int]], batch_size: int
+) -> torch.Tensor:
+    if len(groups) < 2:
+        raise ValueError("Visual grounding requires at least two training images")
+    image_ids = list(groups)
+    selected = torch.randperm(len(image_ids))[: min(batch_size, len(image_ids))]
+    caption_indices = []
+    for position in selected.tolist():
+        candidates = groups[image_ids[position]]
+        choice = int(torch.randint(0, len(candidates), (1,)).item())
+        caption_indices.append(candidates[choice])
+    return torch.tensor(caption_indices, dtype=torch.long)
+
+
+def _warmup_caption_batches(
+    groups: dict[int, list[int]], batch_size: int, epoch: int
+):
+    image_ids = list(groups)
+    max_captions = max(len(indices) for indices in groups.values())
+    for caption_slot in range(max_captions):
+        eligible = [image_idx for image_idx in image_ids if caption_slot < len(groups[image_idx])]
+        order = torch.randperm(len(eligible))
+        for start in range(0, len(order), batch_size):
+            batch_images = [eligible[position] for position in order[start : start + batch_size].tolist()]
+            yield torch.tensor(
+                [groups[image_idx][(caption_slot + epoch) % len(groups[image_idx])] for image_idx in batch_images],
+                dtype=torch.long,
+            )
+
+
+def _visual_checkpoint_eligible(metrics: dict[str, float], gate: float) -> bool:
+    if gate < 0:
+        return True  # Smoke mode validates plumbing rather than research quality.
+    return metrics["correct_nll"] < metrics["shuffled_nll"] and metrics["nll_gap"] >= gate
 
 
 def _device(cfg: Config) -> torch.device:
@@ -101,6 +159,71 @@ def _embed(
         < lengths.to(device)[:, None]
     ).long()
     return wrapper.embed_caption_ids(ids), mask
+
+
+def _validate_visual_grounding(
+    visual: VisualResampler,
+    prompt: PromptAutoencoder,
+    llm: QwenSoftPrefixWrapper,
+    data: dict,
+    groups: dict[int, list[int]],
+    device: torch.device,
+    batch_size: int,
+    max_images: int,
+) -> dict[str, float]:
+    selected = list(groups.items())[:max_images]
+    if len(selected) < 2:
+        raise ValueError("Visual grounding validation requires at least two images")
+
+    correct_total = 0.0
+    shuffled_total = 0.0
+    correct_error_total = 0.0
+    shuffled_error_total = 0.0
+    count = 0
+    visual.eval()
+    with torch.no_grad():
+        for start in range(0, len(selected), batch_size):
+            batch = selected[start : start + batch_size]
+            if len(batch) < 2:
+                break
+            image_indices = torch.tensor([image_idx for image_idx, _ in batch])
+            caption_indices = torch.tensor([indices[0] for _, indices in batch])
+            predicted = visual(data["spatial_features"][image_indices].to(device))
+            target = data["caption_latents"][caption_indices].to(device).float()
+            prefix = prompt.decoder(predicted)
+            ids = data["caption_token_ids"][caption_indices]
+            lengths = data["caption_lengths"][caption_indices]
+            texts = _texts(llm, ids, lengths)
+            permutation = torch.arange(len(batch), device=device).roll(1)
+            correct_nll = llm.caption_teacher_forcing_loss(
+                prefix, texts, reduction="none"
+            )
+            shuffled_nll = llm.caption_teacher_forcing_loss(
+                prefix[permutation], texts, reduction="none"
+            )
+            correct_error = F.mse_loss(predicted, target)
+            shuffled_error = F.mse_loss(predicted[permutation], target)
+            weight = len(batch)
+            correct_total += float(correct_nll.sum().item())
+            shuffled_total += float(shuffled_nll.sum().item())
+            correct_error_total += float(correct_error.item()) * weight
+            shuffled_error_total += float(shuffled_error.item()) * weight
+            count += weight
+    if count == 0:
+        raise ValueError("Visual grounding validation produced no complete batch")
+
+    correct_nll = correct_total / count
+    shuffled_nll = shuffled_total / count
+    correct_error = correct_error_total / count
+    shuffled_error = shuffled_error_total / count
+    return {
+        "correct_nll": correct_nll,
+        "shuffled_nll": shuffled_nll,
+        "nll_gap": (shuffled_nll - correct_nll) / max(correct_nll, 1e-8),
+        "correct_error": correct_error,
+        "shuffled_error": shuffled_error,
+        "latent_gap": (shuffled_error - correct_error) / max(correct_error, 1e-8),
+    }
 
 
 def train_prompt_autoencoder_pipeline(cfg: Config) -> str:
@@ -274,48 +397,46 @@ def train_prompt_autoencoder_pipeline(cfg: Config) -> str:
 
 
 def train_visual_alignment_pipeline(cfg: Config) -> str:
-    """Train spatial Scale-MAE tokens to predict the learned caption latent."""
+    """Learn a compact visual latent that is causally useful to frozen Qwen."""
     set_seed(cfg.seed)
     device = _device(cfg)
     cache, data = _cache(cfg)
     if "caption_latents" not in data:
         raise FileNotFoundError("Run prompt-autoencoder training before visual alignment")
+
     prompt, visual = _models(cfg)
     output = Path(cfg.output_dir) / "visual_alignment_checkpoint"
+    visual_signature = _visual_alignment_signature(cfg)
     visual_contract = {
+        "dataset_fingerprint": data["manifest"]["dataset_fingerprint"],
         "model_type": "visual_alignment",
         "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
-        "visual_alignment_signature": _visual_alignment_signature(cfg),
+        "visual_alignment_signature": visual_signature,
     }
-    if (
-        (output / "model_weights.safetensors").exists()
-        and "visual_latents" in data
-    ):
+    cache_matches_checkpoint = (
+        "visual_latents" in data
+        and data["manifest"].get("visual_alignment_signature") == visual_signature
+        and not data.get("visual_alignment_signature_mismatch", False)
+    )
+    if (output / "model_weights.safetensors").exists() and cache_matches_checkpoint:
         try:
             _, manifest, _ = load_checkpoint(
-                str(output),
-                {"visual": visual},
-                expected_manifest=visual_contract,
+                str(output), {"visual": visual}, expected_manifest=visual_contract
             )
         except ValueError:
             print(
                 "Visual checkpoint settings changed; starting a fresh visual "
-                "alignment run."
+                "grounding run."
             )
         else:
-            gap = float(
-                manifest.get(
-                    "validation_nll_condition_gap",
-                    manifest.get("validation_latent_condition_gap", -1.0),
-                )
-            )
+            gap = float(manifest.get("validation_nll_condition_gap", -1.0))
             if gap < float(cfg.alignment.gate_visual_nll_gap):
                 raise RuntimeError(f"Saved visual checkpoint fails its gate ({gap:.2%}).")
             print(f"Visual checkpoint already complete (condition gap {gap:.2%}); skipping.")
             return str(output)
-    prompt_ckpt = Path(cfg.output_dir) / "prompt_autoencoder_checkpoint"
+
     load_checkpoint(
-        str(prompt_ckpt),
+        str(Path(cfg.output_dir) / "prompt_autoencoder_checkpoint"),
         {"prompt": prompt},
         expected_manifest={
             "model_type": "prompt_autoencoder",
@@ -326,80 +447,181 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
     for parameter in prompt.parameters():
         parameter.requires_grad_(False)
     visual = visual.to(device)
-    optimizer = torch.optim.AdamW(visual.parameters(), lr=cfg.alignment.visual_lr)
     use_amp = device.type == "cuda" and cfg.precision == "fp16"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    train_groups = _caption_groups(data, "train")
+    val_groups = _caption_groups(data, "val")
+    if len(train_groups) < 2 or len(val_groups) < 2:
+        raise ValueError("Visual grounding requires at least two train and validation images")
 
-    train_indices = torch.tensor(
-        [
-            i for i, image_idx in enumerate(data["caption_to_image_idx"].tolist())
-            if data["image_metadata"][image_idx]["split"] == "train"
-        ]
+    # Phase A: inexpensive latent alignment is only a warm start. Each batch
+    # contains unique images so other captions of the same image are not
+    # treated as InfoNCE negatives.
+    warmup_optimizer = torch.optim.AdamW(
+        visual.parameters(), lr=float(cfg.alignment.visual_lr)
     )
-    batch_size = int(cfg.alignment.visual_batch_size)
     update = 0
     visual.train()
     for epoch in range(int(cfg.alignment.visual_epochs)):
-        order = train_indices[torch.randperm(len(train_indices))]
-        for start in range(0, len(order), batch_size):
-            idx = order[start : start + batch_size]
+        epoch_loss = 0.0
+        epoch_batches = 0
+        for idx in _warmup_caption_batches(
+            train_groups, int(cfg.alignment.visual_batch_size), epoch
+        ):
             image_idx = data["caption_to_image_idx"][idx]
             spatial = data["spatial_features"][image_idx].to(device)
             target = data["caption_latents"][idx].to(device).float()
-            optimizer.zero_grad(set_to_none=True)
+            warmup_optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
                 device_type=device.type, dtype=torch.float16, enabled=use_amp
             ):
                 predicted = visual(spatial)
-                loss, metrics = visual_alignment_loss(predicted, target)
+                loss, _ = visual_alignment_loss(predicted, target)
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            scaler.unscale_(warmup_optimizer)
             torch.nn.utils.clip_grad_norm_(visual.parameters(), 1.0)
-            scaler.step(optimizer)
+            scaler.step(warmup_optimizer)
             scaler.update()
+            epoch_loss += float(loss.item())
+            epoch_batches += 1
             update += 1
         print(
-            f"[Visual epoch {epoch + 1}/{int(cfg.alignment.visual_epochs)}] "
-            f"Loss: {loss.item():.4f}"
+            f"[Visual warm-up {epoch + 1}/{int(cfg.alignment.visual_epochs)}] "
+            f"Loss: {epoch_loss / max(epoch_batches, 1):.4f}"
         )
 
-    # Short frozen-Qwen calibration of the visual resampler only.
-    calibration_updates = int(cfg.alignment.visual_calibration_updates)
-    llm = None
-    if calibration_updates > 0:
-        llm = QwenSoftPrefixWrapper(
-            device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
-        )
-        calibration_batch_size = max(
-            1, int(getattr(cfg.alignment, "visual_calibration_batch_size", 1))
-        )
-        accum = int(cfg.alignment.visual_calibration_grad_accum_steps)
+    # Phase B: Qwen and the prompt decoder remain frozen. Caption NLL is the
+    # primary objective; shuffled-image, contrastive, and latent terms are weak
+    # regularizers that preserve image dependence and compact geometry.
+    llm = QwenSoftPrefixWrapper(
+        device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
+    )
+    lm_batch_size = int(cfg.alignment.visual_lm_batch_size)
+    if lm_batch_size < 2:
+        raise ValueError("visual_lm_batch_size must be at least 2")
+    lm_accum = int(cfg.alignment.visual_lm_grad_accum_steps)
+    lm_updates = int(cfg.alignment.visual_lm_updates)
+    validation_interval = max(
+        1, int(cfg.alignment.visual_lm_validation_interval)
+    )
+    validation_batch_size = max(
+        2, int(cfg.alignment.visual_validation_batch_size)
+    )
+    validation_images = int(cfg.alignment.visual_validation_images)
+    gate = float(cfg.alignment.gate_visual_nll_gap)
+    lm_optimizer = torch.optim.AdamW(
+        visual.parameters(), lr=float(cfg.alignment.visual_lm_lr)
+    )
+
+    def snapshot() -> dict[str, torch.Tensor]:
+        return {key: value.detach().cpu().clone() for key, value in visual.state_dict().items()}
+
+    metrics = _validate_visual_grounding(
+        visual,
+        prompt,
+        llm,
+        data,
+        val_groups,
+        device,
+        validation_batch_size,
+        validation_images,
+    )
+    print(
+        f"[Visual LM 0/{lm_updates}] correct NLL {metrics['correct_nll']:.4f} | "
+        f"shuffled NLL {metrics['shuffled_nll']:.4f} | gap {metrics['nll_gap']:.2%}"
+    )
+    best_diagnostic_state = snapshot()
+    best_diagnostic_metrics = metrics
+    best_diagnostic_step = 0
+    best_passing_state = (
+        snapshot() if _visual_checkpoint_eligible(metrics, gate) else None
+    )
+    best_passing_metrics = metrics if best_passing_state is not None else None
+    best_passing_step = 0 if best_passing_state is not None else None
+
+    for lm_step in range(1, lm_updates + 1):
         visual.train()
-        optimizer.zero_grad(set_to_none=True)
-        for cal_step in range(calibration_updates):
-            idx = train_indices[
-                torch.randint(0, len(train_indices), (calibration_batch_size,))
-            ]
+        lm_optimizer.zero_grad(set_to_none=True)
+        running = {"correct_nll": 0.0, "shuffled_nll": 0.0, "total": 0.0}
+        for _ in range(lm_accum):
+            idx = _sample_unique_caption_indices(train_groups, lm_batch_size)
             image_idx = data["caption_to_image_idx"][idx]
+            target = data["caption_latents"][idx].to(device).float()
+            ids = data["caption_token_ids"][idx]
+            lengths = data["caption_lengths"][idx]
+            texts = _texts(llm, ids, lengths)
             with torch.autocast(
                 device_type=device.type, dtype=torch.float16, enabled=use_amp
             ):
-                latent = visual(data["spatial_features"][image_idx].to(device))
-                prefix = prompt.decoder(latent)
-                ids = data["caption_token_ids"][idx]
-                lengths = data["caption_lengths"][idx]
-                texts = _texts(llm, ids, lengths)
-                nll = llm.caption_teacher_forcing_loss(prefix, texts) / accum
-            scaler.scale(nll).backward()
-            if (cal_step + 1) % accum == 0 or cal_step + 1 == calibration_updates:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(visual.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-            update += 1
+                predicted = visual(data["spatial_features"][image_idx].to(device))
+                prefix = prompt.decoder(predicted)
+                permutation = _derangement(len(idx), device)
+                correct_nll = llm.caption_teacher_forcing_loss(
+                    prefix, texts, reduction="none"
+                )
+                shuffled_nll = llm.caption_teacher_forcing_loss(
+                    prefix[permutation], texts, reduction="none"
+                )
+                grounding_loss, grounding = visual_grounding_loss(
+                    correct_nll,
+                    shuffled_nll,
+                    predicted,
+                    target,
+                    shuffle_margin=float(cfg.alignment.visual_shuffle_margin),
+                    shuffle_weight=float(cfg.alignment.visual_shuffle_weight),
+                    contrastive_weight=float(cfg.alignment.visual_contrastive_weight),
+                    latent_weight=float(cfg.alignment.visual_latent_weight),
+                )
+                loss = grounding_loss / lm_accum
+            scaler.scale(loss).backward()
+            running["correct_nll"] += float(grounding["correct_nll"].item())
+            running["shuffled_nll"] += float(grounding["shuffled_nll"].item())
+            running["total"] += float(grounding_loss.item())
+        scaler.unscale_(lm_optimizer)
+        torch.nn.utils.clip_grad_norm_(visual.parameters(), 1.0)
+        scaler.step(lm_optimizer)
+        scaler.update()
+        update += 1
 
+        if lm_step % validation_interval == 0 or lm_step == lm_updates:
+            metrics = _validate_visual_grounding(
+                visual,
+                prompt,
+                llm,
+                data,
+                val_groups,
+                device,
+                validation_batch_size,
+                validation_images,
+            )
+            print(
+                f"[Visual LM {lm_step}/{lm_updates}] train NLL "
+                f"{running['correct_nll'] / lm_accum:.4f} | validation correct "
+                f"{metrics['correct_nll']:.4f} | shuffled "
+                f"{metrics['shuffled_nll']:.4f} | gap {metrics['nll_gap']:.2%}"
+            )
+            if metrics["nll_gap"] > best_diagnostic_metrics["nll_gap"]:
+                best_diagnostic_state = snapshot()
+                best_diagnostic_metrics = metrics
+                best_diagnostic_step = lm_step
+            if _visual_checkpoint_eligible(metrics, gate) and (
+                best_passing_metrics is None
+                or metrics["correct_nll"] < best_passing_metrics["correct_nll"]
+            ):
+                best_passing_state = snapshot()
+                best_passing_metrics = metrics
+                best_passing_step = lm_step
+
+    selected_state = best_passing_state or best_diagnostic_state
+    selected_metrics = best_passing_metrics or best_diagnostic_metrics
+    selected_step = (
+        best_passing_step
+        if best_passing_state is not None
+        else best_diagnostic_step
+    )
+    visual.load_state_dict(selected_state)
     visual.eval()
+
     all_visual = []
     with torch.no_grad():
         for start in range(0, len(data["spatial_features"]), 256):
@@ -409,68 +631,43 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
                 .cpu()
             )
     visual_latents = torch.cat(all_visual)
+    passed_gate = _visual_checkpoint_eligible(selected_metrics, gate)
+    checkpoint_output = (
+        output
+        if passed_gate
+        else Path(cfg.output_dir) / "visual_alignment_failed_checkpoint"
+    )
+    save_checkpoint(
+        str(checkpoint_output),
+        {"visual": visual},
+        {
+            **visual_contract,
+            "best_lm_step": selected_step,
+            "validation_latent_condition_gap": selected_metrics["latent_gap"],
+            "validation_nll_condition_gap": selected_metrics["nll_gap"],
+            "validation_correct_nll": selected_metrics["correct_nll"],
+            "validation_shuffled_nll": selected_metrics["shuffled_nll"],
+        },
+        update,
+    )
+    print(
+        f"Selected visual checkpoint at LM step {selected_step}: correct NLL "
+        f"{selected_metrics['correct_nll']:.4f}, shuffled NLL "
+        f"{selected_metrics['shuffled_nll']:.4f}, gap "
+        f"{selected_metrics['nll_gap']:.2%}, latent gap "
+        f"{selected_metrics['latent_gap']:.2%}"
+    )
+    if not passed_gate:
+        raise RuntimeError(
+            f"Visual grounding gate failed: {selected_metrics['nll_gap']:.2%} < "
+            f"{gate:.2%}. Correct-image NLL did not separate from shuffled-image NLL. "
+            f"Diagnostic weights were saved to {checkpoint_output}."
+        )
+
     cache.save_visual_latents(
         visual_latents,
         {"visual_alignment_signature": _visual_alignment_signature(cfg)},
     )
-
-    val_indices = [
-        i for i, image_idx in enumerate(data["caption_to_image_idx"].tolist())
-        if data["image_metadata"][image_idx]["split"] == "val"
-    ][:64]
-    val_caps = data["caption_latents"][val_indices].float()
-    val_images = data["caption_to_image_idx"][val_indices]
-    val_visual = visual_latents[val_images].float()
-    correct_error = F.mse_loss(val_visual, val_caps).item()
-    shuffled_error = F.mse_loss(val_visual.roll(1, 0), val_caps).item()
-    error_gap = (shuffled_error - correct_error) / max(correct_error, 1e-8)
-    gate_gap = error_gap
-    validation_correct_nll = None
-    validation_shuffled_nll = None
-    if llm is not None and val_indices:
-        with torch.no_grad():
-            correct_latent = val_visual.to(device)
-            ids = data["caption_token_ids"][val_indices]
-            lengths = data["caption_lengths"][val_indices]
-            texts = _texts(llm, ids, lengths)
-            correct_prefix = prompt.decoder(correct_latent)
-            shuffled_prefix = prompt.decoder(correct_latent.roll(1, 0))
-            validation_correct_nll = float(
-                llm.caption_teacher_forcing_loss(correct_prefix, texts).item()
-            )
-            validation_shuffled_nll = float(
-                llm.caption_teacher_forcing_loss(shuffled_prefix, texts).item()
-            )
-        gate_gap = (
-            validation_shuffled_nll - validation_correct_nll
-        ) / max(validation_correct_nll, 1e-8)
-
-    save_checkpoint(
-        str(output),
-        {"visual": visual},
-        {
-            "dataset_fingerprint": data["manifest"]["dataset_fingerprint"],
-            "model_type": "visual_alignment",
-            "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
-            "visual_alignment_signature": _visual_alignment_signature(cfg),
-            "validation_latent_condition_gap": error_gap,
-            "validation_nll_condition_gap": gate_gap,
-            "validation_correct_nll": validation_correct_nll,
-            "validation_shuffled_nll": validation_shuffled_nll,
-        },
-        update,
-        optimizers={"optimizer": optimizer},
-        scalers={"scaler": scaler},
-    )
-    print(
-        f"Visual matched-vs-shuffled latent gap: {error_gap:.2%}; "
-        f"gate gap: {gate_gap:.2%}"
-    )
-    if gate_gap < float(cfg.alignment.gate_visual_nll_gap):
-        raise RuntimeError(
-            f"Visual alignment gate failed: {gate_gap:.2%} < "
-            f"{float(cfg.alignment.gate_visual_nll_gap):.2%}."
-        )
     del llm
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

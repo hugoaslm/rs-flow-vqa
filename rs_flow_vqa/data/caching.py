@@ -1,6 +1,7 @@
 """Feature caching, token embedding lookup table, and manifest validation."""
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import torch
@@ -103,7 +104,19 @@ class FeatureCache:
             "image_metadata": metadata["image_metadata"],
         }
         if self.latents_path.exists():
-            result.update(load_safetensors(str(self.latents_path)))
+            latent_tensors = load_safetensors(str(self.latents_path))
+            if "visual_latents" in latent_tensors:
+                with safe_open(
+                    str(self.latents_path), framework="pt", device="cpu"
+                ) as handle:
+                    tensor_signature = (handle.metadata() or {}).get(
+                        "visual_alignment_signature"
+                    )
+                manifest_signature = manifest.get("visual_alignment_signature")
+                if tensor_signature != manifest_signature:
+                    latent_tensors.pop("visual_latents")
+                    result["visual_alignment_signature_mismatch"] = True
+            result.update(latent_tensors)
         return result
 
     def save_aligned_latents(
@@ -150,13 +163,22 @@ class FeatureCache:
             raise FileNotFoundError("Caption latents must be cached first")
         current = load_safetensors(str(self.latents_path))
         current["visual_latents"] = visual_latents.half().contiguous()
-        save_safetensors(current, str(self.latents_path))
+        metadata = {
+            key: str(value) for key, value in (manifest_meta or {}).items()
+        }
+        latents_tmp = self.latents_path.with_name(f".{self.latents_path.name}.tmp")
+        save_safetensors(current, str(latents_tmp), metadata=metadata)
+        os.replace(latents_tmp, self.latents_path)
         if manifest_meta:
             with open(self.manifest_path, "r", encoding="utf-8") as f:
                 manifest = json.load(f)
             manifest.update(manifest_meta)
-            with open(self.manifest_path, "w", encoding="utf-8") as f:
+            manifest_tmp = self.manifest_path.with_name(
+                f".{self.manifest_path.name}.tmp"
+            )
+            with open(manifest_tmp, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)
+            os.replace(manifest_tmp, self.manifest_path)
 
     def load_visual_conditions_only(self) -> Dict[str, Any]:
         """Load distillation conditions without reading caption target tensors."""
@@ -171,6 +193,15 @@ class FeatureCache:
             required = {"visual_latents", "latent_mean", "latent_std"}
             if not required.issubset(available):
                 raise ValueError(f"Latent cache lacks {sorted(required - available)}")
+            tensor_signature = (handle.metadata() or {}).get(
+                "visual_alignment_signature"
+            )
+            manifest_signature = manifest.get("visual_alignment_signature")
+            if tensor_signature != manifest_signature:
+                raise ValueError(
+                    "Visual latent tensor and cache manifest signatures do not match; "
+                    "rerun visual alignment"
+                )
             return {
                 "manifest": manifest,
                 "visual_latents": handle.get_tensor("visual_latents"),

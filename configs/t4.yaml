@@ -27,12 +27,20 @@ alignment:
   prompt_epochs: 2
   prompt_lr: 0.0002
   prefix_norm_weight: 0.001
-  visual_batch_size: 256  # L4-friendly; use 128 on a T4
-  visual_epochs: 40
+  visual_batch_size: 128
+  visual_epochs: 20  # latent-alignment warm start
   visual_lr: 0.0003
-  visual_calibration_updates: 1024  # calibration micro-batches
-  visual_calibration_batch_size: 2  # L4-friendly; use 1 on a T4
-  visual_calibration_grad_accum_steps: 8  # effective calibration batch: 16
+  visual_lm_updates: 128  # optimizer updates through frozen Qwen
+  visual_lm_batch_size: 2
+  visual_lm_grad_accum_steps: 4
+  visual_lm_lr: 0.00003
+  visual_shuffle_margin: 0.05
+  visual_shuffle_weight: 0.1
+  visual_contrastive_weight: 0.05
+  visual_latent_weight: 0.05
+  visual_lm_validation_interval: 16
+  visual_validation_batch_size: 8
+  visual_validation_images: 64
   qwen_4bit: true
   gate_prompt_nll_gain: 0.05
   gate_visual_nll_gap: 0.02
@@ -45,7 +53,7 @@ bridge:
   dropout: 0.1
 
 teacher:
-  batch_size: 256  # L4-friendly; use 128 on a T4
+  batch_size: 128
   grad_accum_steps: 1
   total_steps: 8000  # optimizer updates; each uses grad_accum_steps microbatches
   lr: 0.0002
@@ -61,7 +69,7 @@ teacher:
   evaluation_nfes: [16, 32]
 
 distillation:
-  batch_size: 128  # L4-friendly; use 64 on a T4
+  batch_size: 64
   grad_accum_steps: 1
   total_steps: 5000  # optimizer updates
   student_lr: 0.00003

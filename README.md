@@ -85,9 +85,10 @@ uv run rs-flow-vqa evaluate-rsvqa --config configs/t4.yaml
 ```
 
 Feature caching stores FP16 spatial features and raw Qwen token IDs. The
-prompt-autoencoder stage is the only expensive frozen-Qwen backward pass.
-Later stages train small latent models from cached tensors. Each stage has a
-matched-vs-shuffled validation gate and checkpoints independently.
+prompt-autoencoder stage learns the compact language space; visual alignment
+then uses a latent warm start followed by caption supervision through frozen
+Qwen. Later flow stages train small latent models from cached tensors. Each
+stage has a matched-vs-shuffled validation gate and checkpoints independently.
 
 FreeFlow is *target-free conditional distillation*: it samples flow states
 only from the Gaussian prior and never reads cached caption targets, but it

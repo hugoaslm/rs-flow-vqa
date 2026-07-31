@@ -171,3 +171,35 @@ def visual_alignment_loss(
     )
     total = smooth + 0.5 * cosine + 0.1 * contrastive
     return total, {"smooth": smooth, "cosine": cosine, "contrastive": contrastive}
+
+
+def visual_grounding_loss(
+    correct_nll: torch.Tensor,
+    shuffled_nll: torch.Tensor,
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    shuffle_margin: float,
+    shuffle_weight: float,
+    contrastive_weight: float,
+    latent_weight: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Frozen-Qwen grounding objective with weak geometry regularization."""
+    _, alignment = visual_alignment_loss(predicted, target)
+    correct_mean = correct_nll.mean()
+    shuffled_mean = shuffled_nll.mean()
+    shuffle = F.relu(correct_nll - shuffled_nll + shuffle_margin).mean()
+    latent = alignment["smooth"] + 0.5 * alignment["cosine"]
+    total = (
+        correct_mean
+        + shuffle_weight * shuffle
+        + contrastive_weight * alignment["contrastive"]
+        + latent_weight * latent
+    )
+    return total, {
+        "correct_nll": correct_mean,
+        "shuffled_nll": shuffled_mean,
+        "shuffle": shuffle,
+        "contrastive": alignment["contrastive"],
+        "latent": latent,
+    }

@@ -3,6 +3,7 @@
 from typing import Tuple, Dict, Any, Optional, Union
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class QwenSoftPrefixWrapper:
@@ -70,8 +71,11 @@ class QwenSoftPrefixWrapper:
         self,
         prefix_embeddings: torch.Tensor,
         captions: list[str],
+        reduction: str = "mean",
     ) -> torch.Tensor:
         """Caption NLL with labels restricted to assistant caption tokens."""
+        if reduction not in {"mean", "none"}:
+            raise ValueError(f"Unsupported reduction {reduction!r}")
         if self.llm_model is None or self.tokenizer is None:
             # A differentiable, deterministic stand-in for CPU smoke tests.
             targets = []
@@ -86,7 +90,8 @@ class QwenSoftPrefixWrapper:
                     )
                 )
             target = torch.stack(targets)
-            return torch.nn.functional.mse_loss(prefix_embeddings.mean(1), target)
+            losses = (prefix_embeddings.mean(1) - target).square().mean(-1)
+            return losses.mean() if reduction == "mean" else losses
 
         scaffold = (
             "<|im_start|>system\nYou describe remote-sensing images accurately."
@@ -143,7 +148,18 @@ class QwenSoftPrefixWrapper:
             labels=padded_labels,
             use_cache=False,
         )
-        return output.loss
+        if reduction == "mean":
+            return output.loss
+        shifted_logits = output.logits[:, :-1].float()
+        shifted_labels = padded_labels[:, 1:]
+        token_losses = F.cross_entropy(
+            shifted_logits.transpose(1, 2),
+            shifted_labels,
+            ignore_index=-100,
+            reduction="none",
+        )
+        valid = shifted_labels != -100
+        return (token_losses * valid).sum(1) / valid.sum(1).clamp_min(1)
 
     def format_chat_embeddings(
         self,

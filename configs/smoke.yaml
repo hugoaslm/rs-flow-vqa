@@ -37,8 +37,17 @@ alignment:
   visual_batch_size: 4
   visual_epochs: 1
   visual_lr: 0.001
-  visual_calibration_updates: 0
-  visual_calibration_grad_accum_steps: 1
+  visual_lm_updates: 2
+  visual_lm_batch_size: 2
+  visual_lm_grad_accum_steps: 1
+  visual_lm_lr: 0.001
+  visual_shuffle_margin: 0.05
+  visual_shuffle_weight: 0.1
+  visual_contrastive_weight: 0.05
+  visual_latent_weight: 0.05
+  visual_lm_validation_interval: 1
+  visual_validation_batch_size: 2
+  visual_validation_images: 4
   qwen_4bit: false
   gate_prompt_nll_gain: -1.0
   gate_visual_nll_gap: -1.0

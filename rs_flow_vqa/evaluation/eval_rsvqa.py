@@ -128,7 +128,15 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> dict:
     )
     mean = cache_data["latent_mean"].to(device)
     std = cache_data["latent_std"].to(device)
-    prompt, visual = _load_alignment(cfg, device)
+    visual_alignment_signature = cache_data["manifest"].get(
+        "visual_alignment_signature"
+    )
+    if (
+        not visual_alignment_signature
+        or cache_data.get("visual_alignment_signature_mismatch", False)
+    ):
+        raise RuntimeError("Run the current visual-alignment stage before evaluation")
+    prompt, visual = _load_alignment(cfg, device, visual_alignment_signature)
 
     # Phase A: cache aligned visual latents, then release Scale-MAE.
     vision = ScaleMAEEncoder(
@@ -151,13 +159,21 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> dict:
     load_checkpoint(
         str(Path(cfg.output_dir) / "teacher_checkpoint"),
         {"teacher": teacher},
-        {"model_type": "latent_flow_teacher", "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION},
+        {
+            "model_type": "latent_flow_teacher",
+            "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": visual_alignment_signature,
+        },
         device=str(device),
     )
     load_checkpoint(
         str(Path(cfg.output_dir) / "freeflow_checkpoint"),
         {"student_ema": student_backbone},
-        {"model_type": "latent_freeflow_student", "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION},
+        {
+            "model_type": "latent_freeflow_student",
+            "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": visual_alignment_signature,
+        },
         device=str(device),
     )
     teacher.eval()
