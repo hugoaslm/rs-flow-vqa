@@ -21,6 +21,28 @@ from rs_flow_vqa.utils.checkpoint import load_checkpoint, save_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
 
 
+VISUAL_ALIGNMENT_TRAINING_VERSION = "visual_alignment_v2"
+
+
+def _visual_alignment_signature(cfg: Config) -> str:
+    alignment = cfg.alignment
+    calibration_batch_size = int(
+        getattr(alignment, "visual_calibration_batch_size", 1)
+    )
+    return ";".join(
+        [
+            VISUAL_ALIGNMENT_TRAINING_VERSION,
+            f"seed={cfg.seed}",
+            f"batch={int(alignment.visual_batch_size)}",
+            f"epochs={int(alignment.visual_epochs)}",
+            f"lr={float(alignment.visual_lr):.8g}",
+            f"cal_updates={int(alignment.visual_calibration_updates)}",
+            f"cal_batch={calibration_batch_size}",
+            f"cal_accum={int(alignment.visual_calibration_grad_accum_steps)}",
+        ]
+    )
+
+
 def _device(cfg: Config) -> torch.device:
     return torch.device(
         cfg.device if cfg.device == "cuda" and torch.cuda.is_available() else "cpu"
@@ -260,28 +282,37 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
         raise FileNotFoundError("Run prompt-autoencoder training before visual alignment")
     prompt, visual = _models(cfg)
     output = Path(cfg.output_dir) / "visual_alignment_checkpoint"
+    visual_contract = {
+        "model_type": "visual_alignment",
+        "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
+        "visual_alignment_signature": _visual_alignment_signature(cfg),
+    }
     if (
         (output / "model_weights.safetensors").exists()
         and "visual_latents" in data
     ):
-        _, manifest, _ = load_checkpoint(
-            str(output),
-            {"visual": visual},
-            expected_manifest={
-                "model_type": "visual_alignment",
-                "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
-            },
-        )
-        gap = float(
-            manifest.get(
-                "validation_nll_condition_gap",
-                manifest.get("validation_latent_condition_gap", -1.0),
+        try:
+            _, manifest, _ = load_checkpoint(
+                str(output),
+                {"visual": visual},
+                expected_manifest=visual_contract,
             )
-        )
-        if gap < float(cfg.alignment.gate_visual_nll_gap):
-            raise RuntimeError(f"Saved visual checkpoint fails its gate ({gap:.2%}).")
-        print(f"Visual checkpoint already complete (condition gap {gap:.2%}); skipping.")
-        return str(output)
+        except ValueError:
+            print(
+                "Visual checkpoint settings changed; starting a fresh visual "
+                "alignment run."
+            )
+        else:
+            gap = float(
+                manifest.get(
+                    "validation_nll_condition_gap",
+                    manifest.get("validation_latent_condition_gap", -1.0),
+                )
+            )
+            if gap < float(cfg.alignment.gate_visual_nll_gap):
+                raise RuntimeError(f"Saved visual checkpoint fails its gate ({gap:.2%}).")
+            print(f"Visual checkpoint already complete (condition gap {gap:.2%}); skipping.")
+            return str(output)
     prompt_ckpt = Path(cfg.output_dir) / "prompt_autoencoder_checkpoint"
     load_checkpoint(
         str(prompt_ckpt),
@@ -339,20 +370,28 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
         llm = QwenSoftPrefixWrapper(
             device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
         )
+        calibration_batch_size = max(
+            1, int(getattr(cfg.alignment, "visual_calibration_batch_size", 1))
+        )
         accum = int(cfg.alignment.visual_calibration_grad_accum_steps)
         visual.train()
         optimizer.zero_grad(set_to_none=True)
         for cal_step in range(calibration_updates):
-            idx = train_indices[torch.randint(0, len(train_indices), (1,))]
+            idx = train_indices[
+                torch.randint(0, len(train_indices), (calibration_batch_size,))
+            ]
             image_idx = data["caption_to_image_idx"][idx]
-            latent = visual(data["spatial_features"][image_idx].to(device))
-            prefix = prompt.decoder(latent)
-            ids = data["caption_token_ids"][idx]
-            lengths = data["caption_lengths"][idx]
-            texts = _texts(llm, ids, lengths)
-            nll = llm.caption_teacher_forcing_loss(prefix, texts) / accum
+            with torch.autocast(
+                device_type=device.type, dtype=torch.float16, enabled=use_amp
+            ):
+                latent = visual(data["spatial_features"][image_idx].to(device))
+                prefix = prompt.decoder(latent)
+                ids = data["caption_token_ids"][idx]
+                lengths = data["caption_lengths"][idx]
+                texts = _texts(llm, ids, lengths)
+                nll = llm.caption_teacher_forcing_loss(prefix, texts) / accum
             scaler.scale(nll).backward()
-            if (cal_step + 1) % accum == 0:
+            if (cal_step + 1) % accum == 0 or cal_step + 1 == calibration_updates:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(visual.parameters(), 1.0)
                 scaler.step(optimizer)
@@ -370,7 +409,10 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
                 .cpu()
             )
     visual_latents = torch.cat(all_visual)
-    cache.save_visual_latents(visual_latents)
+    cache.save_visual_latents(
+        visual_latents,
+        {"visual_alignment_signature": _visual_alignment_signature(cfg)},
+    )
 
     val_indices = [
         i for i, image_idx in enumerate(data["caption_to_image_idx"].tolist())
@@ -410,6 +452,7 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
             "dataset_fingerprint": data["manifest"]["dataset_fingerprint"],
             "model_type": "visual_alignment",
             "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": _visual_alignment_signature(cfg),
             "validation_latent_condition_gap": error_gap,
             "validation_nll_condition_gap": gate_gap,
             "validation_correct_nll": validation_correct_nll,

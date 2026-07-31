@@ -29,6 +29,12 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
     # This API intentionally cannot return caption_latents.
     data = FeatureCache(cfg.cache_dir).load_visual_conditions_only()
     mean, std = data["latent_mean"], data["latent_std"]
+    visual_alignment_signature = data["manifest"].get("visual_alignment_signature")
+    if not visual_alignment_signature:
+        raise RuntimeError(
+            "Visual latents do not record a training signature; rerun visual "
+            "alignment before distilling FreeFlow."
+        )
     conditions = (data["visual_latents"].float() - mean) / std
     train_images = torch.tensor(
         [
@@ -46,6 +52,7 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
             "dataset_fingerprint": data["manifest"]["dataset_fingerprint"],
             "model_type": "latent_flow_teacher",
             "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
+            "visual_alignment_signature": visual_alignment_signature,
         },
         device=str(device),
     )
@@ -82,17 +89,24 @@ def distill_freeflow_pipeline(cfg: Config) -> str:
         "model_type": "latent_freeflow_student",
         "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
         "target_free": True,
+        "visual_alignment_signature": visual_alignment_signature,
     }
     step = 0
     if (output / "model_weights.safetensors").exists():
-        step, _, _ = load_checkpoint(
-            str(output),
-            {"student": student_backbone, "student_ema": ema.shadow, "corrector": corrector},
-            expected_manifest=contract,
-            optimizers={"student": opt_student, "corrector": opt_corrector},
-            scalers={"scaler": scaler},
-            device=str(device),
-        )
+        try:
+            step, _, _ = load_checkpoint(
+                str(output),
+                {"student": student_backbone, "student_ema": ema.shadow, "corrector": corrector},
+                expected_manifest=contract,
+                optimizers={"student": opt_student, "corrector": opt_corrector},
+                scalers={"scaler": scaler},
+                device=str(device),
+            )
+        except ValueError:
+            print(
+                "FreeFlow checkpoint belongs to different visual latents; "
+                "starting a fresh student run."
+            )
 
     total = int(cfg.distillation.total_steps)
     batch = int(cfg.distillation.batch_size)

@@ -141,12 +141,22 @@ class FeatureCache:
             str(self.latents_path),
         )
 
-    def save_visual_latents(self, visual_latents: torch.Tensor) -> None:
+    def save_visual_latents(
+        self,
+        visual_latents: torch.Tensor,
+        manifest_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if not self.latents_path.exists():
             raise FileNotFoundError("Caption latents must be cached first")
         current = load_safetensors(str(self.latents_path))
         current["visual_latents"] = visual_latents.half().contiguous()
         save_safetensors(current, str(self.latents_path))
+        if manifest_meta:
+            with open(self.manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            manifest.update(manifest_meta)
+            with open(self.manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
 
     def load_visual_conditions_only(self) -> Dict[str, Any]:
         """Load distillation conditions without reading caption target tensors."""

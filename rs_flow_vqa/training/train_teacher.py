@@ -45,6 +45,12 @@ def train_teacher_pipeline(cfg: Config) -> str:
             f"Aligned latent cache is incomplete ({sorted(missing)}); "
             "run both alignment stages first."
         )
+    visual_alignment_signature = data["manifest"].get("visual_alignment_signature")
+    if not visual_alignment_signature:
+        raise RuntimeError(
+            "Visual latents do not record a training signature; rerun visual "
+            "alignment before training the teacher."
+        )
     mean = data["latent_mean"]
     std = data["latent_std"]
     targets = (data["caption_latents"].float() - mean) / std
@@ -88,22 +94,30 @@ def train_teacher_pipeline(cfg: Config) -> str:
         "model_type": "latent_flow_teacher",
         "bridge_architecture": LATENT_FLOW_ARCHITECTURE_VERSION,
         "llm_backbone": cfg.models.llm_backbone,
+        "visual_alignment_signature": visual_alignment_signature,
     }
     step = 0
     last_gap = float("-inf")
     if (output / "model_weights.safetensors").exists():
-        step, loaded_manifest, _ = load_checkpoint(
-            str(output),
-            {"teacher": teacher},
-            expected_manifest=contract,
-            optimizers={"optimizer": optimizer},
-            schedulers={"scheduler": scheduler},
-            scalers={"scaler": scaler},
-            device=str(device),
-        )
-        last_gap = float(
-            loaded_manifest.get("validation_condition_gap", last_gap)
-        )
+        try:
+            step, loaded_manifest, _ = load_checkpoint(
+                str(output),
+                {"teacher": teacher},
+                expected_manifest=contract,
+                optimizers={"optimizer": optimizer},
+                schedulers={"scheduler": scheduler},
+                scalers={"scaler": scaler},
+                device=str(device),
+            )
+        except ValueError:
+            print(
+                "Teacher checkpoint belongs to different visual latents; "
+                "starting a fresh teacher run."
+            )
+        else:
+            last_gap = float(
+                loaded_manifest.get("validation_condition_gap", last_gap)
+            )
 
     batch_size = int(cfg.teacher.batch_size)
     accum = int(cfg.teacher.grad_accum_steps)
