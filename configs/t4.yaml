@@ -31,10 +31,10 @@ visual_bridge:
   qformer_layers: 6
 
 alignment:
-  cache_batch_size: 16
-  cache_num_workers: 2
-  prompt_batch_size: 1
-  prompt_grad_accum_steps: 16
+  cache_batch_size: 64  # L4-friendly; use 16 on a T4
+  cache_num_workers: 4
+  prompt_batch_size: 4  # L4-friendly; use 1 on a T4
+  prompt_grad_accum_steps: 4  # effective batch: 16
   prompt_epochs: 2
   prompt_lr: 0.0002
   prefix_norm_weight: 0.001
@@ -42,15 +42,15 @@ alignment:
   visual_epochs: 20  # latent-alignment warm start
   visual_lr: 0.0003
   visual_lm_updates: 128  # optimizer updates through frozen Qwen
-  visual_lm_batch_size: 2
-  visual_lm_grad_accum_steps: 4
+  visual_lm_batch_size: 4  # L4-friendly; use 2 on a T4
+  visual_lm_grad_accum_steps: 2  # effective batch: 8
   visual_lm_lr: 0.00003
   visual_shuffle_margin: 0.05
   visual_shuffle_weight: 0.1
   visual_contrastive_weight: 0.05
   visual_latent_weight: 0.05
   visual_lm_validation_interval: 16
-  visual_validation_batch_size: 8
+  visual_validation_batch_size: 16  # L4-friendly; use 8 on a T4
   visual_validation_images: 64
   qwen_4bit: true
   gate_prompt_nll_gain: 0.05
