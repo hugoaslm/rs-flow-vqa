@@ -221,9 +221,13 @@ class QwenSoftPrefixWrapper:
 
         for b in range(B):
             l = all_inputs_embeds[b].shape[0]
-            padded_embeds[b, :l] = all_inputs_embeds[b]
-            padded_attn[b, :l] = all_attn_masks[b]
-            padded_pos[b, :l] = all_pos_ids[b]
+            offset = max_len - l
+            # Left-padding keeps the final column at a real token for every
+            # row. This is required for batched autoregressive generation;
+            # right-padding would make shorter rows generate from padding.
+            padded_embeds[b, offset:] = all_inputs_embeds[b]
+            padded_attn[b, offset:] = all_attn_masks[b]
+            padded_pos[b, offset:] = all_pos_ids[b]
 
         return padded_embeds, padded_attn, padded_pos
 

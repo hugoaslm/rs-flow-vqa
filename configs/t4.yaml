@@ -83,6 +83,6 @@ data:
 
 evaluation:
   caption_num_images: 200
-  generation_batch_size: 8
+  generation_batch_size: 16  # L4-friendly; reduce to 8 if using a T4
   rsvqa_subset_fraction: 0.10
   eval_seeds: [42, 100, 2024]

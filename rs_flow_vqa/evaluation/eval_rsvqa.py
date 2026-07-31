@@ -21,6 +21,92 @@ from rs_flow_vqa.utils.checkpoint import load_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
 
 
+def _generate_vqa_predictions(
+    samples: list[dict],
+    prefixes: dict,
+    wrong_image: dict,
+    llm: QwenSoftPrefixWrapper,
+    device: torch.device,
+    llm_dim: int,
+    prefix_tokens: int,
+    batch_size: int,
+) -> dict[str, list[dict]]:
+    """Generate all VQA controls in batches while preserving sample order."""
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    predictions = {
+        "text_only_baseline": [],
+        "direct_visual_baseline": [],
+        "teacher_16nfe": [],
+        "student_1step": [],
+        "shuffled_image_teacher_control": [],
+    }
+    for start in range(0, len(samples), batch_size):
+        batch = samples[start : start + batch_size]
+        questions = [sample["question"] for sample in batch]
+        current_size = len(batch)
+        full_mask = torch.ones(
+            current_size, prefix_tokens, device=device
+        )
+        zero_mask = torch.zeros_like(full_mask)
+        zero_prefix = torch.zeros(
+            current_size, prefix_tokens, llm_dim, device=device
+        )
+
+        candidates = {
+            "text_only_baseline": (zero_prefix, zero_mask),
+            "direct_visual_baseline": (
+                torch.cat(
+                    [prefixes[sample["image_id"]]["direct"] for sample in batch],
+                    dim=0,
+                ).to(device),
+                full_mask,
+            ),
+            "teacher_16nfe": (
+                torch.cat(
+                    [prefixes[sample["image_id"]]["teacher"] for sample in batch],
+                    dim=0,
+                ).to(device),
+                full_mask,
+            ),
+            "student_1step": (
+                torch.cat(
+                    [prefixes[sample["image_id"]]["student"] for sample in batch],
+                    dim=0,
+                ).to(device),
+                full_mask,
+            ),
+            "shuffled_image_teacher_control": (
+                torch.cat(
+                    [
+                        prefixes[wrong_image[sample["image_id"]]]["teacher"]
+                        for sample in batch
+                    ],
+                    dim=0,
+                ).to(device),
+                full_mask,
+            ),
+        }
+
+        for name, (prefix, mask) in candidates.items():
+            answers = llm.generate_answer(prefix, questions, mask)
+            if len(answers) != current_size:
+                raise RuntimeError(
+                    f"Qwen returned {len(answers)} answers for {current_size} questions"
+                )
+            for sample, answer in zip(batch, answers):
+                predictions[name].append(
+                    {
+                        "predicted": answer,
+                        "ground_truth": sample["answer"],
+                        "type": sample["type"],
+                    }
+                )
+
+    return predictions
+
+
 def evaluate_rsvqa_pipeline(cfg: Config) -> dict:
     set_seed(cfg.seed)
     device = torch.device(
@@ -109,46 +195,29 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> dict:
     llm = QwenSoftPrefixWrapper(
         device=str(device), model_name=cfg.models.llm_backbone, smoke=cfg.is_smoke
     )
-    predictions = {
-        "text_only_baseline": [],
-        "direct_visual_baseline": [],
-        "teacher_16nfe": [],
-        "student_1step": [],
-        "shuffled_image_teacher_control": [],
-    }
     image_ids = list(prefixes)
     wrong_image = {
         image_id: image_ids[(i + 1) % len(image_ids)]
         for i, image_id in enumerate(image_ids)
     }
-    full_mask = torch.ones(1, cfg.models.prefix_tokens, device=device)
-    zero_mask = torch.zeros_like(full_mask)
-    zero_prefix = torch.zeros(
-        1, cfg.models.prefix_tokens, cfg.models.llm_dim, device=device
+    samples = [dataset[index] for index in range(len(dataset))]
+    generation_batch_size = max(
+        1, int(getattr(cfg.evaluation, "generation_batch_size", 1))
     )
-    print(f"Evaluating {len(dataset)} VQA questions...")
-    for sample in dataset:
-        image_id = sample["image_id"]
-        question = [sample["question"]]
-        candidates = {
-            "text_only_baseline": (zero_prefix, zero_mask),
-            "direct_visual_baseline": (prefixes[image_id]["direct"].to(device), full_mask),
-            "teacher_16nfe": (prefixes[image_id]["teacher"].to(device), full_mask),
-            "student_1step": (prefixes[image_id]["student"].to(device), full_mask),
-            "shuffled_image_teacher_control": (
-                prefixes[wrong_image[image_id]]["teacher"].to(device),
-                full_mask,
-            ),
-        }
-        for name, (prefix, mask) in candidates.items():
-            answer = llm.generate_answer(prefix, question, mask)[0]
-            predictions[name].append(
-                {
-                    "predicted": answer,
-                    "ground_truth": sample["answer"],
-                    "type": sample["type"],
-                }
-            )
+    print(
+        f"Evaluating {len(samples)} VQA questions in batches of "
+        f"{generation_batch_size}..."
+    )
+    predictions = _generate_vqa_predictions(
+        samples,
+        prefixes,
+        wrong_image,
+        llm,
+        device,
+        llm_dim=cfg.models.llm_dim,
+        prefix_tokens=cfg.models.prefix_tokens,
+        batch_size=generation_batch_size,
+    )
     result = {
         name: compute_vqa_accuracy(rows) for name, rows in predictions.items()
     }
