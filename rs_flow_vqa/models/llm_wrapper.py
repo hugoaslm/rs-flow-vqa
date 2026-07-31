@@ -62,7 +62,9 @@ class QwenSoftPrefixWrapper:
                 2048, self.embedding_dim, generator=generator, device=token_ids.device
             )
             return torch.nn.functional.embedding(token_ids.remainder(2048), table)
-        return self.llm_model.get_input_embeddings()(token_ids)
+        # Keep connector inputs compatible with the float32 trainable bridge.
+        # Quantized Qwen models can expose their embedding output as bfloat16.
+        return self.llm_model.get_input_embeddings()(token_ids).float()
 
     def caption_teacher_forcing_loss(
         self,

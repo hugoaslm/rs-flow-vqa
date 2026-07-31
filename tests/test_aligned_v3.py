@@ -1,8 +1,29 @@
 import torch
+import torch.nn as nn
 
 from rs_flow_vqa.models.alignment import PromptAutoencoder, VisualResampler
 from rs_flow_vqa.models.latent_flow import LatentFlowTransformer
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
+
+
+def test_qwen_embedding_wrapper_normalizes_quantized_embedding_dtype():
+    class FakeQwen(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(8, 1536).bfloat16()
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    wrapper = QwenSoftPrefixWrapper(
+        llm_model=FakeQwen(),
+        device="cpu",
+        model_name="Qwen/Qwen2.5-1.5B-Instruct",
+    )
+
+    embeddings = wrapper.embed_caption_ids(torch.tensor([[1, 2, 3]]))
+
+    assert embeddings.dtype == torch.float32
 
 
 def test_alignment_shapes_and_frozen_llm_gradient_path():
