@@ -82,6 +82,8 @@ class FeatureCache:
             raise FileNotFoundError(f"Aligned v3 cache does not exist at {self.cache_dir}")
         with open(self.manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
+        if "spatial_grid_size" not in manifest and "spatial_tokens" in manifest:
+            manifest["spatial_grid_size"] = int(round(manifest["spatial_tokens"] ** 0.5))
         for key, expected in (expected_manifest or {}).items():
             if manifest.get(key) != expected:
                 raise ValueError(
