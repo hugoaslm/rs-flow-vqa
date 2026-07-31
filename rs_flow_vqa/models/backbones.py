@@ -46,12 +46,16 @@ class ScaleMAEEncoder(nn.Module):
         model_name: str = "scale_mae_vit_l",
         device: str = "cpu",
         smoke: bool = False,
+        spatial_grid_size: int = 4,
     ) -> None:
         super().__init__()
         self.model_name = model_name
         self.device_name = device
         self.output_dim = 1024
         self.smoke = smoke
+        self.spatial_grid_size = int(spatial_grid_size)
+        if self.spatial_grid_size not in {4, 7, 14}:
+            raise ValueError("spatial_grid_size must be one of 4, 7, or 14")
 
         if smoke:
             self.model = nn.Sequential(
@@ -86,17 +90,19 @@ class ScaleMAEEncoder(nn.Module):
     def forward_spatial(
         self, images: torch.Tensor, gsd: Optional[float] = 1.0
     ) -> torch.Tensor:
-        """Return a compact 4x4 grid of Scale-MAE patch features.
+        """Return the configured Scale-MAE patch grid.
 
-        The cache deliberately retains spatial structure instead of reducing
-        an image to one vector.  The returned shape is always [B, 16, 1024].
+        The returned shape is ``[B, spatial_grid_size**2, 1024]``.
         """
         if images.ndim != 4 or images.shape[1] != 3:
             raise ValueError(f"Expected BCHW RGB images, got {tuple(images.shape)}")
         if images.shape[-2:] != (224, 224):
             images = F.interpolate(images.float(), (224, 224), mode="bilinear")
         if self.smoke:
-            pooled = F.adaptive_avg_pool2d(images.float() / 255.0, (4, 4))
+            pooled = F.adaptive_avg_pool2d(
+                images.float() / 255.0,
+                (self.spatial_grid_size, self.spatial_grid_size),
+            )
             pooled = pooled.flatten(2).transpose(1, 2)
             # Deterministic zero-copy-style expansion is sufficient for smoke tests.
             repeats = (self.output_dim + pooled.shape[-1] - 1) // pooled.shape[-1]
@@ -124,7 +130,17 @@ class ScaleMAEEncoder(nn.Module):
                 f"Expected a 14x14 Scale-MAE patch grid, got {tokens.shape[1]} tokens."
             )
         grid = tokens.transpose(1, 2).reshape(tokens.shape[0], self.output_dim, 14, 14)
-        return F.adaptive_avg_pool2d(grid, (4, 4)).flatten(2).transpose(1, 2).float()
+        pooled = F.adaptive_avg_pool2d(
+            grid, (self.spatial_grid_size, self.spatial_grid_size)
+        )
+        result = pooled.flatten(2).transpose(1, 2).float()
+        expected = (self.spatial_grid_size**2, self.output_dim)
+        if result.shape[1:] != expected:
+            raise RuntimeError(
+                f"Scale-MAE spatial output has shape {tuple(result.shape)}, "
+                f"expected [B,{expected[0]},{expected[1]}]"
+            )
+        return result
 
     @torch.no_grad()
     def forward(

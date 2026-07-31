@@ -140,7 +140,10 @@ def evaluate_rsvqa_pipeline(cfg: Config) -> dict:
 
     # Phase A: cache aligned visual latents, then release Scale-MAE.
     vision = ScaleMAEEncoder(
-        cfg.models.vision_backbone, device=str(device), smoke=cfg.is_smoke
+        cfg.models.vision_backbone,
+        device=str(device),
+        smoke=cfg.is_smoke,
+        spatial_grid_size=int(cfg.models.spatial_grid_size),
     ).to(device)
     image_conditions = {}
     print(f"Caching {len(dataset.get_unique_image_paths())} RSVQA image conditions...")

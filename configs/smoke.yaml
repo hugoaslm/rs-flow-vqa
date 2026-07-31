@@ -14,10 +14,21 @@ models:
   llm_dim: 1536
   max_caption_length: 16
   prefix_tokens: 8
+  spatial_grid_size: 4
   spatial_tokens: 16
   latent_tokens: 4
   latent_dim: 32
   fixed_gsd: 1.0
+
+visual_bridge:
+  type: "query_resampler"
+  num_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+  pooled_hidden_dim: 64
+  pooled_layers: 1
+  query_layers: 2
+  qformer_layers: 3
 
 bridge:
   hidden_dim: 32

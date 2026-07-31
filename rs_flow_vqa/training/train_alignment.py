@@ -17,6 +17,11 @@ from rs_flow_vqa.models.alignment import (
     visual_alignment_loss,
     visual_grounding_loss,
 )
+from rs_flow_vqa.models.visual_bridge import (
+    build_visual_bridge,
+    visual_bridge_signature,
+    visual_bridge_spec,
+)
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
 from rs_flow_vqa.utils.checkpoint import load_checkpoint, save_checkpoint
 from rs_flow_vqa.utils.reproducibility import set_seed
@@ -29,6 +34,8 @@ def _visual_alignment_signature(cfg: Config) -> str:
     alignment = cfg.alignment
     fields = [
         VISUAL_ALIGNMENT_TRAINING_VERSION,
+        f"bridge_sig={visual_bridge_signature(cfg)}",
+        f"grid={int(cfg.models.spatial_grid_size)}",
         f"seed={cfg.seed}",
         f"batch={int(alignment.visual_batch_size)}",
         f"epochs={int(alignment.visual_epochs)}",
@@ -114,24 +121,21 @@ def _cache(cfg: Config) -> tuple[FeatureCache, dict]:
             "cache_version": "aligned_v3",
             "vision_backbone": cfg.models.vision_backbone,
             "llm_backbone": cfg.models.llm_backbone,
+            "spatial_grid_size": int(cfg.models.spatial_grid_size),
             "token_storage": "raw_qwen_ids",
         }
     )
     return cache, data
 
 
-def _models(cfg: Config) -> tuple[PromptAutoencoder, VisualResampler]:
+def _models(cfg: Config) -> tuple[PromptAutoencoder, torch.nn.Module]:
     prompt = PromptAutoencoder(
         llm_dim=cfg.models.llm_dim,
         latent_dim=cfg.models.latent_dim,
         latent_tokens=cfg.models.latent_tokens,
         prefix_tokens=cfg.models.prefix_tokens,
     )
-    visual = VisualResampler(
-        vision_dim=cfg.models.vision_dim,
-        latent_dim=cfg.models.latent_dim,
-        latent_tokens=cfg.models.latent_tokens,
-    )
+    visual = build_visual_bridge(cfg)
     return prompt, visual
 
 
@@ -162,7 +166,7 @@ def _embed(
 
 
 def _validate_visual_grounding(
-    visual: VisualResampler,
+    visual: torch.nn.Module,
     prompt: PromptAutoencoder,
     llm: QwenSoftPrefixWrapper,
     data: dict,
@@ -407,10 +411,14 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
     prompt, visual = _models(cfg)
     output = Path(cfg.output_dir) / "visual_alignment_checkpoint"
     visual_signature = _visual_alignment_signature(cfg)
+    bridge_spec = visual_bridge_spec(cfg)
     visual_contract = {
         "dataset_fingerprint": data["manifest"]["dataset_fingerprint"],
         "model_type": "visual_alignment",
         "alignment_architecture": ALIGNMENT_ARCHITECTURE_VERSION,
+        "spatial_grid_size": int(cfg.models.spatial_grid_size),
+        "visual_bridge_type": bridge_spec["type"],
+        "visual_bridge_signature": visual_bridge_signature(cfg),
         "visual_alignment_signature": visual_signature,
     }
     cache_matches_checkpoint = (

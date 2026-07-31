@@ -20,8 +20,14 @@ from pathlib import Path
 def test_end2end_pipeline_smoke():
     """Run end-to-end CPU smoke test across all pipeline stages."""
     with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_cache = str(Path(tmp_dir) / "cache")
         # Load smoke configuration
-        cfg = load_config(smoke=True, device_override="cpu", output_dir_override=tmp_dir)
+        cfg = load_config(
+            smoke=True,
+            device_override="cpu",
+            output_dir_override=tmp_dir,
+            cache_dir_override=tmp_cache,
+        )
 
         # 1. Feature caching
         args = argparse.Namespace(
@@ -30,12 +36,14 @@ def test_end2end_pipeline_smoke():
             device="cpu",
             seed=42,
             output_dir=tmp_dir,
+            cache_dir=tmp_cache,
         )
         cache_features_cmd(args)
         cached = FeatureCache(cfg.cache_dir).load_spatial_cache(
             {
                 "cache_version": "aligned_v3",
                 "token_storage": "raw_qwen_ids",
+                "spatial_grid_size": 4,
             }
         )
         assert cached["spatial_features"].shape[1:] == (16, 1024)

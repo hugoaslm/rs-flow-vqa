@@ -3,16 +3,19 @@
 Conditional Flow Matching and FreeFlow distillation for bridging frozen
 Scale-MAE remote-sensing features into frozen Qwen2.5-1.5B-Instruct.
 
-The v3 pipeline avoids regressing raw LLM token embeddings. It learns a
-language-compatible compact latent and preserves a 4×4 Scale-MAE patch grid:
+The v3 pipeline avoids regressing raw LLM token embeddings. It maps a
+configurable Scale-MAE spatial grid into a language-compatible compact latent:
 
 ```text
-Scale-MAE [16,1024] -> visual resampler -> latent [8,256]
-                                             |
-                              CFM teacher -> FreeFlow student
-                                             |
-                           prompt decoder -> Qwen prefix [16,1536]
+Scale-MAE [S,1024] -> visual bridge -> latent [8,256]
+                                          |
+                           CFM teacher -> FreeFlow student
+                                          |
+                        prompt decoder -> Qwen prefix [16,1536]
 ```
+
+Supported spatial grid sizes are `4×4` (16 tokens), `7×7` (49 tokens), and `14×14` (196 tokens).
+Supported visual bridge architectures are `query_resampler` (default 2-layer cross-attention), `pooled_mlp` (spatial pooling + MLP), and `qformer_resampler` (6-layer visual querying transformer). All bridges map spatial tokens into the shared `[8,256]` latent space.
 
 ## Install
 

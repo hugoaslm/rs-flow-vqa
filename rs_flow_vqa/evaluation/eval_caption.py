@@ -15,8 +15,8 @@ from rs_flow_vqa.evaluation.metrics import compute_bleu, compute_rouge_l
 from rs_flow_vqa.models.alignment import (
     ALIGNMENT_ARCHITECTURE_VERSION,
     PromptAutoencoder,
-    VisualResampler,
 )
+from rs_flow_vqa.models.visual_bridge import build_visual_bridge
 from rs_flow_vqa.models.flow_matching import sample_heun
 from rs_flow_vqa.models.freeflow import FreeFlowStudent
 from rs_flow_vqa.models.latent_flow import LATENT_FLOW_ARCHITECTURE_VERSION
@@ -37,9 +37,7 @@ def _load_alignment(
         cfg.models.latent_tokens,
         cfg.models.prefix_tokens,
     ).to(device)
-    visual = VisualResampler(
-        cfg.models.vision_dim, cfg.models.latent_dim, cfg.models.latent_tokens
-    ).to(device)
+    visual = build_visual_bridge(cfg).to(device)
     load_checkpoint(
         str(Path(cfg.output_dir) / "prompt_autoencoder_checkpoint"),
         {"prompt": prompt},

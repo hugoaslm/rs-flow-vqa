@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from rs_flow_vqa.config import load_config
+from rs_flow_vqa.config import Config, load_config
 from rs_flow_vqa.utils.smoke_data import generate_synthetic_rsicd
 from rs_flow_vqa.data.caching import FeatureCache
 from rs_flow_vqa.data.whitening import WhiteningNormalizer
@@ -36,15 +36,22 @@ from rs_flow_vqa.utils.reproducibility import set_seed
 import torch
 
 
+def _cfg_from_args(args: argparse.Namespace) -> Config:
+    return load_config(
+        config_path=getattr(args, "config", None),
+        smoke=getattr(args, "smoke", False),
+        device_override=getattr(args, "device", None),
+        seed_override=getattr(args, "seed", None),
+        output_dir_override=getattr(args, "output_dir", None),
+        cache_dir_override=getattr(args, "cache_dir", None),
+        spatial_grid_size_override=getattr(args, "spatial_grid_size", None),
+        visual_bridge_override=getattr(args, "visual_bridge", None),
+    )
+
+
 def prepare_rsicd_cmd(args: argparse.Namespace) -> None:
     """Subcommand: prepare-rsicd"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     print(f"Preparing RSICD dataset at: {cfg.data.rsicd_data_dir}")
     ds = RSICDDataset(data_dir=cfg.data.rsicd_data_dir, split="all", is_smoke=cfg.get("is_smoke", False))
     print(f"RSICD preparation complete. Loaded {len(ds)} caption samples.")
@@ -52,13 +59,7 @@ def prepare_rsicd_cmd(args: argparse.Namespace) -> None:
 
 def cache_features_cmd(args: argparse.Namespace) -> None:
     """Cache v3 Scale-MAE spatial tokens and raw Qwen caption IDs."""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     print(f"Caching Scale-MAE spatial tokens and Qwen caption IDs to: {cfg.cache_dir}")
 
     set_seed(cfg.seed)
@@ -136,7 +137,10 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
         ]
     else:
         vision = ScaleMAEEncoder(
-            cfg.models.vision_backbone, device=str(device), smoke=False
+            cfg.models.vision_backbone,
+            device=str(device),
+            smoke=False,
+            spatial_grid_size=int(cfg.models.spatial_grid_size),
         ).to(device)
         feature_batches = []
         vision_batch_size = int(cfg.alignment.cache_batch_size)
@@ -224,75 +228,41 @@ def cache_features_cmd(args: argparse.Namespace) -> None:
 
 def train_teacher_cmd(args: argparse.Namespace) -> None:
     """Subcommand: train-teacher"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     train_teacher_pipeline(cfg)
 
 
 def train_prompt_autoencoder_cmd(args: argparse.Namespace) -> None:
-    cfg = load_config(
-        args.config, args.smoke, args.device, args.seed, args.output_dir
-    )
+    cfg = _cfg_from_args(args)
     train_prompt_autoencoder_pipeline(cfg)
 
 
 def train_visual_alignment_cmd(args: argparse.Namespace) -> None:
-    cfg = load_config(
-        args.config, args.smoke, args.device, args.seed, args.output_dir
-    )
+    cfg = _cfg_from_args(args)
     train_visual_alignment_pipeline(cfg)
 
 
 def distill_freeflow_cmd(args: argparse.Namespace) -> None:
     """Subcommand: distill-freeflow"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     distill_freeflow_pipeline(cfg)
 
 
 def evaluate_caption_cmd(args: argparse.Namespace) -> None:
     """Subcommand: evaluate-caption"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     evaluate_caption_pipeline(cfg)
 
 
 def evaluate_rsvqa_cmd(args: argparse.Namespace) -> None:
     """Subcommand: evaluate-rsvqa"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     evaluate_rsvqa_pipeline(cfg)
 
 
 def answer_cmd(args: argparse.Namespace) -> None:
     """Subcommand: answer --image IMAGE --question QUESTION --checkpoint CHECKPOINT"""
-    cfg = load_config(
-        config_path=args.config,
-        smoke=args.smoke,
-        device_override=args.device,
-        seed_override=args.seed,
-        output_dir_override=args.output_dir,
-    )
+    cfg = _cfg_from_args(args)
     device = torch.device(cfg.device if torch.cuda.is_available() and cfg.device == "cuda" else "cpu")
 
     print(f"Answering VQA Question for Image: {args.image}")
@@ -301,7 +271,10 @@ def answer_cmd(args: argparse.Namespace) -> None:
 
     prompt, visual = _load_alignment(cfg, device)
     vision_encoder = ScaleMAEEncoder(
-        cfg.models.vision_backbone, device=str(device), smoke=cfg.is_smoke
+        cfg.models.vision_backbone,
+        device=str(device),
+        smoke=cfg.is_smoke,
+        spatial_grid_size=int(cfg.models.spatial_grid_size),
     ).to(device)
     image = load_rgb_image(args.image).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -365,6 +338,21 @@ def main() -> None:
         p.add_argument("--device", type=str, default=None, help="Device override (cuda/cpu)")
         p.add_argument("--seed", type=int, default=None, help="Random seed override")
         p.add_argument("--output-dir", type=str, default=None, help="Output directory override")
+        p.add_argument("--cache-dir", type=str, default=None, help="Cache directory override")
+        p.add_argument(
+            "--spatial-grid-size",
+            type=int,
+            choices=[4, 7, 14],
+            default=None,
+            help="Scale-MAE spatial grid size (4, 7, 14)",
+        )
+        p.add_argument(
+            "--visual-bridge",
+            type=str,
+            choices=["pooled_mlp", "query_resampler", "qformer_resampler"],
+            default=None,
+            help="Visual bridge architecture",
+        )
 
     # prepare-rsicd
     p1 = subparsers.add_parser("prepare-rsicd", help="Prepare RSICD dataset")

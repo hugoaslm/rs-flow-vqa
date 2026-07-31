@@ -126,7 +126,7 @@ class PromptAutoencoder(nn.Module):
 
 
 class VisualResampler(nn.Module):
-    """Map a 4x4 Scale-MAE token grid into the shared prompt latent."""
+    """Map a Scale-MAE token grid into the shared prompt latent."""
 
     def __init__(
         self,
@@ -134,9 +134,12 @@ class VisualResampler(nn.Module):
         latent_dim: int = 256,
         latent_tokens: int = 8,
         layers: int = 2,
+        spatial_grid_size: int | None = None,
     ) -> None:
         super().__init__()
         heads = 4 if latent_dim % 4 == 0 else 1
+        self.vision_dim = vision_dim
+        self.spatial_grid_size = spatial_grid_size
         self.input_norm = nn.LayerNorm(vision_dim)
         self.input_proj = nn.Linear(vision_dim, latent_dim)
         self.queries = nn.Parameter(torch.randn(1, latent_tokens, latent_dim) * 0.02)
@@ -146,6 +149,19 @@ class VisualResampler(nn.Module):
         self.norm = nn.LayerNorm(latent_dim)
 
     def forward(self, spatial_features: torch.Tensor) -> torch.Tensor:
+        if spatial_features.ndim != 3 or spatial_features.shape[-1] != self.vision_dim:
+            raise ValueError(
+                f"Expected [B,S,{self.vision_dim}] spatial features, got "
+                f"{tuple(spatial_features.shape)}"
+            )
+        if (
+            self.spatial_grid_size is not None
+            and spatial_features.shape[1] != self.spatial_grid_size**2
+        ):
+            raise ValueError(
+                f"Expected {self.spatial_grid_size**2} spatial tokens, got "
+                f"{spatial_features.shape[1]}"
+            )
         context = self.input_proj(self.input_norm(spatial_features))
         queries = self.queries.expand(context.shape[0], -1, -1)
         for block in self.blocks:

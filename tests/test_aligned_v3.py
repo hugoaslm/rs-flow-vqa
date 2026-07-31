@@ -4,6 +4,7 @@ import torch.nn as nn
 from rs_flow_vqa.models.alignment import PromptAutoencoder, VisualResampler
 from rs_flow_vqa.models.latent_flow import LatentFlowTransformer
 from rs_flow_vqa.models.llm_wrapper import QwenSoftPrefixWrapper
+from rs_flow_vqa.models.visual_bridge import build_visual_bridge
 
 
 def test_qwen_embedding_wrapper_normalizes_quantized_embedding_dtype():

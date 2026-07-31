@@ -14,10 +14,21 @@ models:
   llm_dim: 1536
   max_caption_length: 32
   prefix_tokens: 16
-  spatial_tokens: 16
+  spatial_grid_size: 4  # ablations: 4, 7, 14
+  spatial_tokens: 16  # must equal spatial_grid_size squared
   latent_tokens: 8
   latent_dim: 256
   fixed_gsd: 1.0  # Default GSD for RSICD
+
+visual_bridge:
+  type: "query_resampler"  # pooled_mlp | query_resampler | qformer_resampler
+  num_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+  pooled_hidden_dim: 512
+  pooled_layers: 3
+  query_layers: 2
+  qformer_layers: 6
 
 alignment:
   cache_batch_size: 16

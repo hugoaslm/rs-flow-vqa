@@ -63,9 +63,11 @@ class FeatureCache:
                 },
                 f,
             )
+        grid_size = int(round(spatial_features.shape[1] ** 0.5))
         manifest = {
             "num_images": int(spatial_features.shape[0]),
             "num_captions": int(caption_token_ids.shape[0]),
+            "spatial_grid_size": grid_size,
             "spatial_tokens": int(spatial_features.shape[1]),
             "vision_dim": int(spatial_features.shape[2]),
             **manifest_meta,
