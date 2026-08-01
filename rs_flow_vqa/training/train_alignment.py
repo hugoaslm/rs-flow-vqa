@@ -410,6 +410,7 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
 
     prompt, visual = _models(cfg)
     output = Path(cfg.output_dir) / "visual_alignment_checkpoint"
+    failed_output = Path(cfg.output_dir) / "visual_alignment_failed_checkpoint"
     visual_signature = _visual_alignment_signature(cfg)
     bridge_spec = visual_bridge_spec(cfg)
     visual_contract = {
@@ -452,6 +453,24 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
                 )
             print(f"Visual checkpoint already complete (condition gap {gap:.2%}); skipping.")
             return str(output)
+    elif (failed_output / "model_weights.safetensors").exists():
+        try:
+            _, manifest, _ = load_checkpoint(
+                str(failed_output), {"visual": visual}, expected_manifest=visual_contract
+            )
+        except ValueError:
+            print(
+                "Failed visual checkpoint settings changed; starting a fresh visual "
+                "grounding run."
+            )
+        else:
+            gap = float(manifest.get("validation_nll_condition_gap", -1.0))
+            gate = float(cfg.alignment.gate_visual_nll_gap)
+            raise RuntimeError(
+                f"Visual grounding gate failed: {gap:.2%} < {gate:.2%}. "
+                f"Correct-image NLL did not separate from shuffled-image NLL. "
+                f"Diagnostic weights were loaded from {failed_output}."
+            )
 
     load_checkpoint(
         str(Path(cfg.output_dir) / "prompt_autoencoder_checkpoint"),
