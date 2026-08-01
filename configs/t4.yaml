@@ -41,7 +41,7 @@ alignment:
   visual_batch_size: 128
   visual_epochs: 20  # latent-alignment warm start
   visual_lr: 0.0003
-  visual_lm_updates: 128  # optimizer updates through frozen Qwen
+  visual_lm_updates: 0  # 0 for clean latent alignment; >0 for LM fine-tuning
   visual_lm_batch_size: 4  # L4-friendly; use 2 on a T4
   visual_lm_grad_accum_steps: 2  # effective batch: 8
   visual_lm_lr: 0.00003
