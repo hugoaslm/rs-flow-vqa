@@ -422,6 +422,11 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
         "visual_bridge_signature": visual_bridge_signature(cfg),
         "visual_alignment_signature": visual_signature,
     }
+    cache_matches_checkpoint = (
+        "visual_latents" in data
+        and data["manifest"].get("visual_alignment_signature") == visual_signature
+        and not data.get("visual_alignment_signature_mismatch", False)
+    )
     if (output / "model_weights.safetensors").exists():
         try:
             _, manifest, _ = load_checkpoint(
