@@ -421,12 +421,7 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
         "visual_bridge_signature": visual_bridge_signature(cfg),
         "visual_alignment_signature": visual_signature,
     }
-    cache_matches_checkpoint = (
-        "visual_latents" in data
-        and data["manifest"].get("visual_alignment_signature") == visual_signature
-        and not data.get("visual_alignment_signature_mismatch", False)
-    )
-    if (output / "model_weights.safetensors").exists() and cache_matches_checkpoint:
+    if (output / "model_weights.safetensors").exists():
         try:
             _, manifest, _ = load_checkpoint(
                 str(output), {"visual": visual}, expected_manifest=visual_contract
@@ -440,6 +435,21 @@ def train_visual_alignment_pipeline(cfg: Config) -> str:
             gap = float(manifest.get("validation_nll_condition_gap", -1.0))
             if gap < float(cfg.alignment.gate_visual_nll_gap):
                 raise RuntimeError(f"Saved visual checkpoint fails its gate ({gap:.2%}).")
+            if not cache_matches_checkpoint:
+                print("Updating cache visual latents from saved visual checkpoint...")
+                visual = visual.to(device).eval()
+                all_visual = []
+                with torch.no_grad():
+                    for start in range(0, len(data["spatial_features"]), 256):
+                        all_visual.append(
+                            visual(data["spatial_features"][start : start + 256].to(device))
+                            .float()
+                            .cpu()
+                        )
+                cache.save_visual_latents(
+                    torch.cat(all_visual),
+                    {"visual_alignment_signature": visual_signature},
+                )
             print(f"Visual checkpoint already complete (condition gap {gap:.2%}); skipping.")
             return str(output)
 
